@@ -23,6 +23,8 @@ export default function NewRequisition() {
   const [items, setItems] = useState([]);
   const [note, setNote] = useState("");
   const [attachment, setAttachment] = useState("");
+  const [attachmentFileId, setAttachmentFileId] = useState(null);
+  const [uploading, setUploading] = useState(false);
   const [reqDate, setReqDate] = useState(new Date().toISOString().slice(0, 10));
   const [reqNo, setReqNo] = useState("REQ-2026-XXXX");
   const [chain, setChain] = useState([]);
@@ -57,6 +59,24 @@ export default function NewRequisition() {
 
   const removeItem = (i) => setItems((prev) => prev.filter((_, idx) => idx !== i));
 
+  const handleAttachment = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setAttachmentFileId(data.id);
+      setAttachment(data.original_filename);
+      toast.success("Attachment uploaded");
+    } catch (err) {
+      toast.error(formatApiErrorDetail(err.response?.data?.detail) || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const submit = async () => {
     if (items.length === 0) return toast.error("Add at least one item");
     setSubmitting(true);
@@ -66,7 +86,8 @@ export default function NewRequisition() {
         requisition_for: user?.name,
         items,
         requester_note: note || null,
-        attachment_path: attachment || null,
+        attachment_file_id: attachmentFileId,
+        attachment_name: attachment || null,
         requisition_date: reqDate,
       });
       toast.success(`Requisition ${data.requisition_no} submitted`);
@@ -238,9 +259,9 @@ export default function NewRequisition() {
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
           <div className="flex items-center gap-2 mb-4"><Paperclip size={18} className="text-slate-400" /><h3 className="font-head font-semibold text-slate-900">Attachments &amp; Notes</h3></div>
           <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">Attachment (Optional)</label>
-          <input type="file" data-testid="input-attachment" onChange={(e) => setAttachment(e.target.files?.[0]?.name || "")}
+          <input type="file" data-testid="input-attachment" onChange={handleAttachment}
             className="w-full text-sm mb-1 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-slate-100 file:text-slate-700 file:font-medium" />
-          <p className="text-xs text-slate-400 mb-4">{attachment || "No file selected"}</p>
+          <p className="text-xs text-slate-400 mb-4">{uploading ? "Uploading…" : (attachment || "No file selected")}</p>
           <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">Requester Note (Optional)</label>
           <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={4} placeholder="Add any additional note…" data-testid="input-requester-note"
             className="w-full px-3 py-2.5 rounded-lg border border-slate-300 focus:border-amber-500 outline-none text-sm resize-none" />

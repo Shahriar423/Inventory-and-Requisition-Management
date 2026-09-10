@@ -248,8 +248,9 @@ class TestApproveFlow:
         assert act.json()["status"] in ("pending_it", "pending_accounts", "pending_md", "pending_purchase")
 
     def test_reject_flow(self, pr_exec, it_head):
+        # For step 2, service requisitions cannot use /action; use product instead.
         r = pr_exec["session"].post(f"{API}/requisitions", json={
-            "requisition_type": "service",
+            "requisition_type": "product",
             "items": [{"product_type": "consumable", "product_name": "TEST Reject", "quantity": 1, "rate": 100}],
         })
         rid = r.json()["id"]
@@ -257,6 +258,16 @@ class TestApproveFlow:
                                        json={"action": "reject", "note": "no"})
         assert act.status_code == 200
         assert act.json()["status"] == "rejected"
+
+    def test_action_on_service_rejected_400(self, pr_exec, it_head):
+        r = pr_exec["session"].post(f"{API}/requisitions", json={
+            "requisition_type": "service",
+            "items": [{"product_type": "consumable", "product_name": "TEST SvcAction", "quantity": 1, "rate": 100}],
+        })
+        rid = r.json()["id"]
+        act = it_head["session"].post(f"{API}/requisitions/{rid}/action",
+                                       json={"action": "approve", "note": "x"})
+        assert act.status_code == 400
 
 
 class TestListsAndStats:
@@ -288,3 +299,177 @@ class TestPermissionsMgmt:
         assert set(r2.json()["items"]) == set(new_items)
         # restore
         admin["session"].put(f"{API}/permissions/dept_head", json={"items": original})
+
+
+# =========================== STEP 2 FEATURES ==========================
+import io as _io
+
+
+class TestFilesUploadDownload:
+    def test_upload_and_download(self, pr_exec):
+        payload = b"hello test file content"
+        files = {"file": ("test_note.txt", _io.BytesIO(payload), "text/plain")}
+        r = pr_exec["session"].post(f"{API}/files/upload", files=files)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["original_filename"] == "test_note.txt"
+        assert d["size"] == len(payload)
+        fid = d["id"]
+        # Download
+        r2 = pr_exec["session"].get(f"{API}/files/{fid}/download")
+        assert r2.status_code == 200
+        assert r2.content == payload
+
+    def test_download_requires_auth(self):
+        r = requests.get(f"{API}/files/nonexistent/download")
+        assert r.status_code == 401
+
+
+class TestServiceWorkflow:
+    def test_service_transition_full_flow(self, pr_exec, it_head):
+        # Create service requisition
+        r = pr_exec["session"].post(f"{API}/requisitions", json={
+            "requisition_type": "service",
+            "items": [{"product_type": "consumable", "product_name": "TEST SvcFlow", "quantity": 1, "rate": 100}],
+        })
+        assert r.status_code == 200
+        rid = r.json()["id"]
+        assert r.json()["status"] == "pending_it_service"
+
+        # Advance step-by-step as IT head
+        expected = ["product_collected_by_it", "sent_to_service_center", "service_completed_and_returned"]
+        for exp in expected:
+            r2 = it_head["session"].post(f"{API}/requisitions/{rid}/service-transition", json={})
+            assert r2.status_code == 200, r2.text
+            assert r2.json()["status"] == exp
+        # Now closed -> further transition should 400
+        r3 = it_head["session"].post(f"{API}/requisitions/{rid}/service-transition", json={})
+        assert r3.status_code == 400
+
+    def test_service_transition_forbidden_for_others(self, pr_exec):
+        r = pr_exec["session"].post(f"{API}/requisitions", json={
+            "requisition_type": "service",
+            "items": [{"product_type": "consumable", "product_name": "TEST SvcForbid", "quantity": 1, "rate": 100}],
+        })
+        rid = r.json()["id"]
+        # Requester (executive) is not IT head nor super_admin -> should be 403
+        r2 = pr_exec["session"].post(f"{API}/requisitions/{rid}/service-transition", json={})
+        assert r2.status_code == 403
+
+
+class TestPurchaseRequisitionPDF:
+    def test_pdf_returns_bytes_and_assigns_pr_no(self, pr_exec):
+        r = pr_exec["session"].post(f"{API}/requisitions", json={
+            "requisition_type": "product",
+            "items": [{"product_type": "asset", "product_name": "TEST PDF", "quantity": 1, "rate": 1234}],
+            "requester_note": "TEST pdf",
+        })
+        rid = r.json()["id"]
+        r2 = pr_exec["session"].get(f"{API}/requisitions/{rid}/pdf")
+        assert r2.status_code == 200
+        assert r2.headers["content-type"].startswith("application/pdf")
+        assert r2.content[:4] == b"%PDF"
+        # verify PR number stored and starts with LPRIT-YYYYMM
+        r3 = pr_exec["session"].get(f"{API}/requisitions/{rid}")
+        pr_no = r3.json().get("purchase_pr_no")
+        assert pr_no and pr_no.startswith("LPRIT-")
+        assert len(pr_no.split("-")[1]) == 10  # YYYYMM + 4 digits
+
+
+class TestAssetsAndGRN:
+    def test_grn_creates_assets_and_shows_in_stock(self, admin):
+        challan = f"CH-{uuid.uuid4().hex[:6]}"
+        payload = {
+            "challan_no": challan, "vendor_name": "TEST Vendor",
+            "items": [{
+                "product_name": "TEST Laptop", "uom": "Nos", "quantity": 2, "rate": 45000,
+                "assets": [
+                    {"serial_no": f"SN-{uuid.uuid4().hex[:6]}", "tag_id": f"TAG-{uuid.uuid4().hex[:6]}"},
+                    {"serial_no": f"SN-{uuid.uuid4().hex[:6]}", "tag_id": f"TAG-{uuid.uuid4().hex[:6]}"},
+                ],
+            }],
+        }
+        r = admin["session"].post(f"{API}/grns", json=payload)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["grn_no"].startswith("GRN-")
+        assert d["created_assets"] == 2
+        # verify assets visible
+        r2 = admin["session"].get(f"{API}/assets?status=in_stock")
+        assert r2.status_code == 200
+        names = [a["name"] for a in r2.json()]
+        assert "TEST Laptop" in names
+
+    def test_grn_rbac_denied_for_executive(self, pr_exec):
+        r = pr_exec["session"].post(f"{API}/grns", json={
+            "challan_no": "X", "vendor_name": "X",
+            "items": [{"product_name": "x", "quantity": 1, "rate": 1, "assets": []}],
+        })
+        assert r.status_code == 403
+
+
+class TestHandovers:
+    def test_handover_assigns_asset_and_takeover_returns_it(self, admin):
+        # Create a fresh asset via GRN
+        challan = f"CH-{uuid.uuid4().hex[:6]}"
+        sn = f"SN-{uuid.uuid4().hex[:8]}"
+        r = admin["session"].post(f"{API}/grns", json={
+            "challan_no": challan, "vendor_name": "TEST V2",
+            "items": [{"product_name": "TEST Monitor", "quantity": 1, "rate": 15000,
+                       "assets": [{"serial_no": sn, "tag_id": f"TAG-{uuid.uuid4().hex[:6]}"}]}],
+        })
+        assert r.status_code == 200
+        # Find the asset just created (by serial)
+        r2 = admin["session"].get(f"{API}/assets?status=in_stock")
+        asset = next(a for a in r2.json() if a.get("serial_no") == sn)
+        aid = asset["id"]
+
+        # Handover
+        hr = admin["session"].post(f"{API}/handovers", json={
+            "type": "handover", "employee_name": "TEST Emp",
+            "items": [{"item": "TEST Monitor", "quantity": 1, "asset_id": aid}],
+            "prepared_by_sign": "data:image/png;base64,AAAA",
+            "received_by_sign": "data:image/png;base64,BBBB",
+        })
+        assert hr.status_code == 200, hr.text
+        hd = hr.json()
+        assert hd["slip_no"].startswith("HO-")
+        assert hd["prepared_by_sign"] == "data:image/png;base64,AAAA"
+
+        # Asset should be assigned
+        ra = admin["session"].get(f"{API}/assets?assigned_to=TEST Emp")
+        assert any(a["id"] == aid and a["status"] == "assigned" for a in ra.json())
+
+        # Takeover
+        tr = admin["session"].post(f"{API}/handovers", json={
+            "type": "takeover", "employee_name": "TEST Emp",
+            "items": [{"item": "TEST Monitor", "quantity": 1, "asset_id": aid}],
+        })
+        assert tr.status_code == 200
+        assert tr.json()["slip_no"].startswith("TO-")
+
+        # Asset should be returned
+        rlist = admin["session"].get(f"{API}/assets?status=returned")
+        assert any(a["id"] == aid for a in rlist.json())
+
+    def test_handover_delete_requires_super_admin(self, pr_exec, admin):
+        hr = admin["session"].post(f"{API}/handovers", json={
+            "type": "handover", "employee_name": "TEST DelEmp",
+            "items": [{"item": "TEST", "quantity": 1}],
+        })
+        hid = hr.json()["id"]
+        # non-super
+        rf = pr_exec["session"].delete(f"{API}/handovers/{hid}")
+        assert rf.status_code == 403
+        # super_admin ok
+        rs = admin["session"].delete(f"{API}/handovers/{hid}")
+        assert rs.status_code == 200
+
+
+class TestDashboardStep2:
+    def test_dashboard_has_assets_fields(self, admin):
+        r = admin["session"].get(f"{API}/dashboard/stats")
+        assert r.status_code == 200
+        d = r.json()
+        assert "assets_total" in d and isinstance(d["assets_total"], int)
+        assert "assets_assigned" in d and isinstance(d["assets_assigned"], int)

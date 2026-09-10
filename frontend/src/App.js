@@ -12,6 +12,11 @@ import Departments from "@/pages/Departments";
 import Categories from "@/pages/Categories";
 import Approvals from "@/pages/Approvals";
 import Placeholder from "@/pages/Placeholder";
+import StockGRN from "@/pages/StockGRN";
+import StockList from "@/pages/StockList";
+import AssignedAssets from "@/pages/AssignedAssets";
+import HandoverModule from "@/pages/HandoverModule";
+import HandoverRecords from "@/pages/HandoverRecords";
 
 function App() {
   return (
@@ -23,16 +28,16 @@ function App() {
             <Route element={<Shell />}>
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/assigned-assets" element={<Placeholder title="Assigned Assets" note="Track IT assets assigned to each employee. Coming in a later step." />} />
+              <Route path="/assigned-assets" element={<AssignedAssets />} />
               <Route path="/requisitions/new" element={<NewRequisition />} />
               <Route path="/requisitions/pending" element={<RequisitionList scope="pending" />} />
               <Route path="/requisitions/purchase" element={<RequisitionList scope="purchase" />} />
               <Route path="/requisitions/approve" element={<RequisitionList scope="approve" />} />
               <Route path="/requisitions/history" element={<RequisitionList scope="history" />} />
-              <Route path="/stock" element={<Placeholder title="Stock List" />} />
-              <Route path="/purchase/grn" element={<Placeholder title="Stock GRN (Vendor Challan)" />} />
-              <Route path="/handover" element={<Placeholder title="Handover Module" />} />
-              <Route path="/handover/records" element={<Placeholder title="Handover Records" />} />
+              <Route path="/stock" element={<StockList />} />
+              <Route path="/purchase/grn" element={<StockGRN />} />
+              <Route path="/handover" element={<HandoverModule />} />
+              <Route path="/handover/records" element={<HandoverRecords />} />
               <Route path="/approvals" element={<Approvals />} />
               <Route path="/organization/departments" element={<Departments />} />
               <Route path="/organization/categories" element={<Categories />} />

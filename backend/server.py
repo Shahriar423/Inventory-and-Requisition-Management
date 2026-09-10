@@ -5,7 +5,7 @@ import os
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends, UploadFile, File
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
@@ -112,8 +112,18 @@ DEFAULT_PERMISSIONS = {
 
 REQ_STATUSES = [
     "pending_dept", "pending_it_service", "product_collected_by_it", "sent_to_service_center",
-    "pending_it", "pending_accounts", "pending_md", "pending_purchase", "approved", "rejected",
+    "service_completed_and_returned", "pending_it", "pending_accounts", "pending_md",
+    "pending_purchase", "approved", "rejected",
 ]
+
+# Ordered operational stages for service requisitions.
+SERVICE_STAGES = [
+    "pending_it_service", "product_collected_by_it", "sent_to_service_center",
+    "service_completed_and_returned",
+]
+
+# Statuses that mean the requisition is closed (no further approval action).
+FINALIZED = ["approved", "rejected", "service_completed_and_returned"]
 
 MD_THRESHOLD = 50000  # BDT
 
@@ -313,6 +323,8 @@ class RequisitionIn(BaseModel):
     items: List[RequisitionItemIn]
     requester_note: Optional[str] = None
     attachment_path: Optional[str] = None
+    attachment_file_id: Optional[str] = None
+    attachment_name: Optional[str] = None
     requisition_date: Optional[str] = None
 
 class ApproveIn(BaseModel):
@@ -544,6 +556,8 @@ async def create_requisition(payload: RequisitionIn, user: dict = Depends(get_cu
         "total_amount": total_amount,
         "requester_note": payload.requester_note,
         "attachment_path": payload.attachment_path,
+        "attachment_file_id": payload.attachment_file_id,
+        "attachment_name": payload.attachment_name,
         "requisition_date": payload.requisition_date or now_iso(),
         "approval_chain": chain,
         "status": "",
@@ -568,10 +582,10 @@ async def list_requisitions(scope: str = "all", user: dict = Depends(get_current
     if scope == "mine":
         query["requisitioner_id"] = str(user["_id"])
     elif scope == "pending":
-        query = {"requisitioner_id": str(user["_id"]), "status": {"$nin": ["approved", "rejected"]}}
+        query = {"requisitioner_id": str(user["_id"]), "status": {"$nin": FINALIZED}}
     elif scope == "approve":
         # requisitions where current pending step is assigned to this user
-        docs = await db.requisitions.find({"status": {"$nin": ["approved", "rejected"]}}).sort("created_at", -1).to_list(1000)
+        docs = await db.requisitions.find({"status": {"$nin": FINALIZED}}).sort("created_at", -1).to_list(1000)
         out = []
         for d in docs:
             chain = d["approval_chain"]
@@ -580,7 +594,7 @@ async def list_requisitions(scope: str = "all", user: dict = Depends(get_current
                 out.append(serialize_req(d))
         return out
     elif scope == "history":
-        query = {"status": {"$in": ["approved", "rejected"]}}
+        query = {"status": {"$in": FINALIZED}}
     docs = await db.requisitions.find(query).sort("created_at", -1).to_list(1000)
     return [serialize_req(d) for d in docs]
 
@@ -596,8 +610,10 @@ async def act_on_requisition(req_id: str, payload: ApproveIn, user: dict = Depen
     d = await db.requisitions.find_one({"_id": ObjectId(req_id)})
     if not d:
         raise HTTPException(status_code=404, detail="Requisition not found")
-    if d["status"] in ("approved", "rejected"):
+    if d["status"] in FINALIZED:
         raise HTTPException(status_code=400, detail="Requisition already finalized")
+    if d["requisition_type"] == "service":
+        raise HTTPException(status_code=400, detail="Use the service workflow to manage service requisitions")
     chain = d["approval_chain"]
     current = next((s for s in chain if s["status"] == "pending"), None)
     if not current:
@@ -620,12 +636,14 @@ async def act_on_requisition(req_id: str, payload: ApproveIn, user: dict = Depen
 @api_router.get("/dashboard/stats")
 async def dashboard_stats(user: dict = Depends(get_current_user)):
     total = await db.requisitions.count_documents({})
-    pending = await db.requisitions.count_documents({"status": {"$nin": ["approved", "rejected"]}})
+    pending = await db.requisitions.count_documents({"status": {"$nin": FINALIZED}})
     approved = await db.requisitions.count_documents({"status": "approved"})
     rejected = await db.requisitions.count_documents({"status": "rejected"})
     high_value = await db.requisitions.count_documents({"total_amount": {"$gte": MD_THRESHOLD}})
+    assets_total = await db.assets.count_documents({})
+    assets_assigned = await db.assets.count_documents({"status": "assigned"})
     # my approvals queue
-    docs = await db.requisitions.find({"status": {"$nin": ["approved", "rejected"]}}).to_list(1000)
+    docs = await db.requisitions.find({"status": {"$nin": FINALIZED}}).to_list(1000)
     my_queue = 0
     for dc in docs:
         cur = next((s for s in dc["approval_chain"] if s["status"] == "pending"), None)
@@ -635,8 +653,396 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
     return {
         "total": total, "pending": pending, "approved": approved, "rejected": rejected,
         "high_value": high_value, "my_queue": my_queue,
+        "assets_total": assets_total, "assets_assigned": assets_assigned,
         "recent": [serialize_req(r) for r in recent],
     }
+
+# ===========================================================================
+# STEP 2 FEATURES: storage, files, service workflow, PDF, handovers, assets, GRN
+# ===========================================================================
+import io
+import uuid
+import requests as _requests
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
+EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+APP_NAME = "ims-req"
+_storage_key = None
+
+MIME_TYPES = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+    "webp": "image/webp", "pdf": "application/pdf", "csv": "text/csv", "txt": "text/plain",
+    "doc": "application/msword", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+def init_storage(force: bool = False):
+    global _storage_key
+    if _storage_key and not force:
+        return _storage_key
+    resp = _requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
+    resp.raise_for_status()
+    _storage_key = resp.json()["storage_key"]
+    return _storage_key
+
+def put_object(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    r = _requests.put(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key, "Content-Type": content_type}, data=data, timeout=120)
+    if r.status_code == 404:
+        key = init_storage(force=True)
+        r = _requests.put(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key, "Content-Type": content_type}, data=data, timeout=120)
+    r.raise_for_status()
+    return r.json()
+
+def get_object(path: str):
+    key = init_storage()
+    r = _requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    if r.status_code == 404:
+        key = init_storage(force=True)
+        r = _requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    r.raise_for_status()
+    return r.content, r.headers.get("Content-Type", "application/octet-stream")
+
+def strip_id(doc: dict) -> dict:
+    doc = dict(doc)
+    doc["id"] = str(doc.pop("_id"))
+    return doc
+
+async def _next_no(prefix: str, key: str) -> str:
+    year = datetime.now(timezone.utc).year
+    c = await db.counters.find_one_and_update({"_id": f"{key}-{year}"}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER)
+    return f"{prefix}-{year}-{c['seq']:04d}"
+
+async def user_from_token(token: str):
+    try:
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        return await db.users.find_one({"_id": ObjectId(payload["sub"])})
+    except Exception:
+        return None
+
+# --------------------------- File upload / download ------------------------
+@api_router.post("/files/upload")
+async def upload_file(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "bin"
+    fid = str(uuid.uuid4())
+    path = f"{APP_NAME}/uploads/{user['_id']}/{fid}.{ext}"
+    data = await file.read()
+    ct = file.content_type or MIME_TYPES.get(ext, "application/octet-stream")
+    result = put_object(path, data, ct)
+    doc = {
+        "id": fid, "storage_path": result["path"], "original_filename": file.filename,
+        "content_type": ct, "size": result.get("size", len(data)), "is_deleted": False,
+        "uploaded_by": str(user["_id"]), "created_at": now_iso(),
+    }
+    await db.files.insert_one(doc)
+    return {"id": fid, "original_filename": file.filename, "size": doc["size"], "content_type": ct}
+
+@api_router.get("/files/{file_id}/download")
+async def download_file(file_id: str, request: Request, auth: Optional[str] = None):
+    token = request.cookies.get("access_token") or auth
+    if not token:
+        h = request.headers.get("Authorization", "")
+        token = h[7:] if h.startswith("Bearer ") else None
+    if not token or not await user_from_token(token):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    rec = await db.files.find_one({"id": file_id, "is_deleted": False})
+    if not rec:
+        raise HTTPException(status_code=404, detail="File not found")
+    data, ct = get_object(rec["storage_path"])
+    return Response(content=data, media_type=rec.get("content_type", ct),
+                    headers={"Content-Disposition": f'inline; filename="{rec["original_filename"]}"'})
+
+# --------------------------- Service workflow ------------------------------
+class ServiceTransitionIn(BaseModel):
+    stage: Optional[str] = None
+    note: Optional[str] = None
+
+@api_router.post("/requisitions/{req_id}/service-transition")
+async def service_transition(req_id: str, payload: ServiceTransitionIn, user: dict = Depends(get_current_user)):
+    d = await db.requisitions.find_one({"_id": ObjectId(req_id)})
+    if not d:
+        raise HTTPException(status_code=404, detail="Requisition not found")
+    if d["requisition_type"] != "service":
+        raise HTTPException(status_code=400, detail="Not a service requisition")
+    if d["status"] in ("service_completed_and_returned", "rejected"):
+        raise HTTPException(status_code=400, detail="Service requisition already closed")
+    step = d["approval_chain"][0]
+    if not (step["approver_id"] == str(user["_id"]) or user["role"] == "super_admin"):
+        raise HTTPException(status_code=403, detail="Only the assigned IT Head can manage this service requisition")
+    cur = d["status"] if d["status"] in SERVICE_STAGES else SERVICE_STAGES[0]
+    idx = SERVICE_STAGES.index(cur)
+    target = payload.stage or (SERVICE_STAGES[idx + 1] if idx + 1 < len(SERVICE_STAGES) else cur)
+    if target not in SERVICE_STAGES or SERVICE_STAGES.index(target) <= idx:
+        raise HTTPException(status_code=400, detail="Invalid stage transition (must move forward)")
+    d["status"] = target
+    d["updated_at"] = now_iso()
+    d["history"].append({"at": now_iso(), "by": user["name"], "action": f"service:{target}", "note": payload.note})
+    if target == "service_completed_and_returned":
+        step["status"] = "approved"
+        step["acted_at"] = now_iso()
+    await db.requisitions.update_one({"_id": ObjectId(req_id)}, {"$set": {
+        "status": target, "approval_chain": d["approval_chain"], "history": d["history"], "updated_at": d["updated_at"]}})
+    return serialize_req(d)
+
+# --------------------------- Purchase Requisition PDF ----------------------
+async def _pr_number(req: dict) -> str:
+    if req.get("purchase_pr_no"):
+        return req["purchase_pr_no"]
+    now = datetime.now(timezone.utc)
+    c = await db.counters.find_one_and_update({"_id": f"pr-{now.year}"}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER)
+    pr_no = f"LPRIT-{now.year}{now.month:02d}{c['seq']:04d}"
+    await db.requisitions.update_one({"_id": req["_id"]}, {"$set": {"purchase_pr_no": pr_no}})
+    return pr_no
+
+def build_pr_pdf(req: dict, pr_no: str, dept_name: str) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm, leftMargin=14 * mm, rightMargin=14 * mm)
+    styles = getSampleStyleSheet()
+    small = ParagraphStyle("small", parent=styles["Normal"], fontSize=8, leading=10)
+    story = []
+    story.append(Paragraph("<b>Primitek Industries Limited</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)))
+    story.append(Paragraph("A concern of Primitek Group — Delivering Excellence", small))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph("<b>Purchase Requisition</b>", ParagraphStyle("c", parent=styles["Heading2"], alignment=1)))
+    story.append(Spacer(1, 8))
+
+    req_date = (req.get("requisition_date") or "")[:10]
+    meta = [
+        ["Department", ": " + (dept_name or "-"), "PR No.", ": " + pr_no],
+        ["Purchase Type", ": Local Purchase Requisition", "PR Date", ": " + req_date],
+        ["Delivery Location", ": Head Office", "Required Date", ": " + req_date],
+        ["Status", ": " + req.get("status", "").replace("_", " ").title(), "", ""],
+    ]
+    mt = Table(meta, colWidths=[32 * mm, 60 * mm, 28 * mm, 60 * mm])
+    mt.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
+    story.append(mt)
+    story.append(Spacer(1, 8))
+
+    header = ["SL", "Item Code", "Item Name", "UoM", "Req Qty", "In Stock", "Rate", "Remarks"]
+    rows = [header]
+    for i, it in enumerate(req.get("items", []), start=1):
+        rows.append([
+            str(i),
+            it.get("item_code") or f"IT{1000040 + i}",
+            Paragraph(it.get("product_name", ""), small),
+            it.get("uom", "Nos"),
+            f"{it.get('quantity', 0):.2f}",
+            "0.00",
+            f"{it.get('rate', 0):,.2f}",
+            Paragraph(it.get("remarks") or "-", small),
+        ])
+    tbl = Table(rows, colWidths=[10 * mm, 24 * mm, 48 * mm, 14 * mm, 18 * mm, 18 * mm, 22 * mm, 30 * mm])
+    tbl.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (4, 1), (6, -1), "RIGHT"),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(f"<b>Total Amount:</b> BDT {req.get('total_amount', 0):,.2f}", small))
+    if req.get("requester_note"):
+        story.append(Paragraph(f"<b>Note:</b> {req['requester_note']}", small))
+    story.append(Spacer(1, 26))
+
+    approvers = [req.get("requisitioner_name", "-")]
+    for s in req.get("approval_chain", []):
+        approvers.append(s.get("approver_name") or "-")
+    labels = ["Prepared By", "Checked By", "Recommended By", "Authorized By", "Approved By"]
+    names = (approvers + ["-"] * 5)[:5]
+    sig = [names, labels]
+    st = Table(sig, colWidths=[38 * mm] * 5)
+    st.setStyle(TableStyle([
+        ("LINEABOVE", (0, 0), (-1, 0), 0.5, colors.black),
+        ("FONTSIZE", (0, 0), (-1, -1), 8), ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, 0), 2),
+    ]))
+    story.append(st)
+    doc.build(story)
+    return buf.getvalue()
+
+@api_router.get("/requisitions/{req_id}/pdf")
+async def requisition_pdf(req_id: str, request: Request, auth: Optional[str] = None):
+    token = request.cookies.get("access_token") or auth
+    if not token or not await user_from_token(token):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    d = await db.requisitions.find_one({"_id": ObjectId(req_id)})
+    if not d:
+        raise HTTPException(status_code=404, detail="Requisition not found")
+    pr_no = await _pr_number(d)
+    dept_name = None
+    did = d.get("requisitioner_department_id")
+    if did and ObjectId.is_valid(did):
+        dp = await db.departments.find_one({"_id": ObjectId(did)})
+        dept_name = dp["name"] if dp else None
+    pdf = build_pr_pdf(d, pr_no, dept_name or "Information Technology")
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{pr_no}.pdf"'})
+
+# --------------------------- Assets ----------------------------------------
+class AssetIn(BaseModel):
+    name: str
+    brand: Optional[str] = None
+    serial_no: Optional[str] = None
+    tag_id: Optional[str] = None
+    category_id: Optional[str] = None
+
+async def _enrich_asset(a: dict) -> dict:
+    a = strip_id(a)
+    if a.get("category_id") and ObjectId.is_valid(a["category_id"]):
+        c = await db.categories.find_one({"_id": ObjectId(a["category_id"])})
+        a["category_name"] = c["name"] if c else None
+    return a
+
+@api_router.get("/assets")
+async def list_assets(status: Optional[str] = None, assigned_to: Optional[str] = None, user: dict = Depends(get_current_user)):
+    q = {}
+    if status:
+        q["status"] = status
+    if assigned_to:
+        q["assigned_to"] = assigned_to
+    docs = await db.assets.find(q).sort("created_at", -1).to_list(1000)
+    return [await _enrich_asset(a) for a in docs]
+
+@api_router.post("/assets")
+async def create_asset(payload: AssetIn, user: dict = Depends(require_roles("super_admin", "dept_head", "purchase_head"))):
+    doc = payload.model_dump()
+    doc.update({"status": "in_stock", "assigned_to": None, "assigned_department_id": None,
+                "source_grn_id": None, "created_at": now_iso()})
+    res = await db.assets.insert_one(doc)
+    doc["_id"] = res.inserted_id
+    return await _enrich_asset(doc)
+
+# --------------------------- Stock GRN & tagging ---------------------------
+class GrnAssetIn(BaseModel):
+    serial_no: Optional[str] = None
+    tag_id: Optional[str] = None
+
+class GrnItemIn(BaseModel):
+    product_name: str
+    category_id: Optional[str] = None
+    uom: Optional[str] = "Nos"
+    quantity: int = 1
+    rate: float = 0
+    assets: List[GrnAssetIn] = []
+
+class GrnIn(BaseModel):
+    challan_no: str
+    vendor_name: str
+    received_date: Optional[str] = None
+    delivery_location: Optional[str] = None
+    requisition_id: Optional[str] = None
+    items: List[GrnItemIn]
+
+@api_router.get("/grns")
+async def list_grns(user: dict = Depends(get_current_user)):
+    docs = await db.grns.find().sort("created_at", -1).to_list(1000)
+    return [strip_id(g) for g in docs]
+
+@api_router.post("/grns")
+async def create_grn(payload: GrnIn, user: dict = Depends(require_roles("super_admin", "dept_head", "purchase_head"))):
+    grn_no = await _next_no("GRN", "grn")
+    items = [it.model_dump() for it in payload.items]
+    doc = {
+        "grn_no": grn_no, "challan_no": payload.challan_no, "vendor_name": payload.vendor_name,
+        "received_date": payload.received_date or now_iso(), "delivery_location": payload.delivery_location or "Head Office",
+        "requisition_id": payload.requisition_id, "items": items,
+        "received_by": user["name"], "created_at": now_iso(),
+    }
+    res = await db.grns.insert_one(doc)
+    grn_id = str(res.inserted_id)
+    created_assets = 0
+    for it in items:
+        for a in it.get("assets", []):
+            if not (a.get("serial_no") or a.get("tag_id")):
+                continue
+            await db.assets.insert_one({
+                "name": it["product_name"], "brand": None,
+                "serial_no": a.get("serial_no"), "tag_id": a.get("tag_id"),
+                "category_id": it.get("category_id"), "status": "in_stock",
+                "assigned_to": None, "assigned_department_id": None,
+                "source_grn_id": grn_id, "created_at": now_iso(),
+            })
+            created_assets += 1
+    doc["_id"] = res.inserted_id
+    out = strip_id(doc)
+    out["created_assets"] = created_assets
+    return out
+
+# --------------------------- Handover / Takeover ---------------------------
+class HandoverItemIn(BaseModel):
+    item: str
+    brand: Optional[str] = None
+    quantity: int = 1
+    remarks: Optional[str] = None
+    asset_id: Optional[str] = None
+
+class HandoverIn(BaseModel):
+    type: Literal["handover", "takeover"]
+    employee_name: str
+    department_id: Optional[str] = None
+    items: List[HandoverItemIn]
+    remarks: Optional[str] = None
+    note: Optional[str] = None
+    handover_date: Optional[str] = None
+    prepared_by_sign: Optional[str] = None
+    received_by_sign: Optional[str] = None
+
+async def _enrich_handover(h: dict) -> dict:
+    h = strip_id(h)
+    if h.get("department_id") and ObjectId.is_valid(h["department_id"]):
+        d = await db.departments.find_one({"_id": ObjectId(h["department_id"])})
+        h["department_name"] = d["name"] if d else None
+    return h
+
+@api_router.get("/handovers")
+async def list_handovers(user: dict = Depends(get_current_user)):
+    docs = await db.handovers.find().sort("created_at", -1).to_list(1000)
+    return [await _enrich_handover(h) for h in docs]
+
+@api_router.get("/handovers/{hid}")
+async def get_handover(hid: str, user: dict = Depends(get_current_user)):
+    h = await db.handovers.find_one({"_id": ObjectId(hid)})
+    if not h:
+        raise HTTPException(status_code=404, detail="Not found")
+    return await _enrich_handover(h)
+
+@api_router.post("/handovers")
+async def create_handover(payload: HandoverIn, user: dict = Depends(get_current_user)):
+    slip_no = await _next_no("HO" if payload.type == "handover" else "TO", "handover")
+    items = [it.model_dump() for it in payload.items]
+    doc = {
+        "slip_no": slip_no, "type": payload.type, "employee_name": payload.employee_name,
+        "department_id": payload.department_id, "items": items, "remarks": payload.remarks,
+        "note": payload.note, "handover_date": payload.handover_date or now_iso(),
+        "prepared_by": user["name"], "prepared_by_sign": payload.prepared_by_sign,
+        "received_by_sign": payload.received_by_sign, "created_at": now_iso(),
+    }
+    res = await db.handovers.insert_one(doc)
+    # update linked asset assignment
+    for it in items:
+        if not it.get("asset_id") or not ObjectId.is_valid(it["asset_id"]):
+            continue
+        if payload.type == "handover":
+            upd = {"status": "assigned", "assigned_to": payload.employee_name, "assigned_department_id": payload.department_id}
+        else:
+            upd = {"status": "returned", "assigned_to": None, "assigned_department_id": None}
+        await db.assets.update_one({"_id": ObjectId(it["asset_id"])}, {"$set": upd})
+    doc["_id"] = res.inserted_id
+    return await _enrich_handover(doc)
+
+@api_router.delete("/handovers/{hid}")
+async def delete_handover(hid: str, user: dict = Depends(require_roles("super_admin"))):
+    await db.handovers.delete_one({"_id": ObjectId(hid)})
+    return {"ok": True}
+
 
 # ---------------------------------------------------------------------------
 # Seeding
@@ -722,6 +1128,11 @@ async def seed():
 @app.on_event("startup")
 async def on_startup():
     await seed()
+    try:
+        init_storage()
+        logger.info("Object storage initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():

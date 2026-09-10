@@ -30,16 +30,17 @@ Super Admin, Dept Head, Executive, Accounts, MD (Managing Director), Purchase He
 - Dashboard stats + recent requisitions.
 - **Verified**: 23/23 backend pytest + full frontend Playwright flows at 100%.
 
-## Backlog / Remaining (P1/P2)
-- **P1 Assigned Assets**: track assets assigned to employees (screenshot: Handover/Take Over forms).
-- **P1 Handover Module & Records**: hand-over / take-over slips (per attached Primitek handover sheet).
-- **P1 File Purchase Requisition (PR document)**: generate the printable Purchase Requisition (LPRIT-YYYY...) with item code, UoM, last purchase history, signatures.
-- **P2 Stock List & Stock GRN (Vendor Challan)**.
-- **P2 Real file/object storage** for attachments (currently filename-only).
-- **P2 Notifications** for pending approvals; brute-force lockout hardening.
-- **P2 Service workflow extra statuses** (product_collected_by_it, sent_to_service_center) as manual IT transitions.
+## Implemented — Step 2 (2026-09-10)
+- **Service workflow**: statuses pending_it_service → product_collected_by_it → sent_to_service_center → service_completed_and_returned via `/api/requisitions/{id}/service-transition` (IT Head/super_admin). UI shows an "Advance" button for service reqs in the Approve queue.
+- **Real file attachments**: Emergent object storage. `/api/files/upload` + `/api/files/{id}/download`. New Requisition form uploads attachments and stores the file id.
+- **Purchase Requisition PDF**: reportlab-generated printable sheet matching the Primitek layout (item code, UoM, rate, totals, approver signature row); auto PR No `LPRIT-YYYYMM####`. "PDF" button on product requisitions.
+- **Handover / Takeover**: `/api/handovers` with digital signature canvas (base64), Hand Over/Take Over slips (HO-/TO-####), item lines, remarks/notes. Handover assigns a linked asset to the employee; takeover returns it.
+- **Stock GRN & asset tagging**: `/api/grns` captures vendor challan + per-unit serial/tag, creating tagged asset records (GRN-####). Stock List and Assigned Assets pages render assets and per-employee custody.
+- Dashboard now includes asset counts. **Verified**: 34/34 backend tests + all Step 2 frontend flows at 100%.
 
-## Next Tasks
-1. Assigned Assets module + Handover/Take-over records.
-2. Printable Purchase Requisition document generation.
-3. Object storage for attachments.
+## Backlog / Remaining (P1/P2)
+- **P2 Router split**: server.py is large; split into modules before further growth.
+- **P2 Handover guards**: validate asset is in_stock before assigning; match employee on takeover.
+- **P2 Signed download tokens** instead of `?auth=` JWT query fallback.
+- **P2 Approver Management** UI could also reorder/override approval chain approvers.
+- **P2 Notifications** for pending approvals.

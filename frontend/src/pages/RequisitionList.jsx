@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Eye, Check, X, ShieldCheck } from "lucide-react";
-import api, { formatApiErrorDetail } from "@/lib/apiClient";
+import { Eye, Check, X, ShieldCheck, FileText, FastForward } from "lucide-react";
+import api, { API, formatApiErrorDetail } from "@/lib/apiClient";
 import { StatusBadge, bdt } from "@/lib/status";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -49,6 +49,18 @@ export default function RequisitionList({ scope }) {
     }
   };
 
+  const serviceAdvance = async (id) => {
+    try {
+      const { data } = await api.post(`/requisitions/${id}/service-transition`, {});
+      toast.success(`Moved to: ${data.status.replaceAll("_", " ")}`);
+      setDetail(null);
+      load();
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e.response?.data?.detail));
+    }
+  };
+  const openPdf = (id) => window.open(`${API}/requisitions/${id}/pdf`, "_blank");
+
   const h = HEADINGS[scope] || HEADINGS.pending;
   const canApproveHere = scope === "approve";
 
@@ -87,7 +99,15 @@ export default function RequisitionList({ scope }) {
                   <div className="flex items-center justify-end gap-2">
                     <button onClick={() => setDetail(r)} data-testid={`btn-view-${r.requisition_no}`}
                       className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors"><Eye size={14} /> View</button>
-                    {canApproveHere && (
+                    {r.requisition_type === "product" && (
+                      <button onClick={() => openPdf(r.id)} data-testid={`btn-pdf-${r.requisition_no}`}
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors"><FileText size={14} /> PDF</button>
+                    )}
+                    {canApproveHere && r.requisition_type === "service" && (
+                      <button onClick={() => serviceAdvance(r.id)} data-testid={`btn-service-advance-${r.requisition_no}`}
+                        className="px-3 py-1.5 rounded-lg bg-sky-600 text-white text-xs font-semibold hover:bg-sky-700 flex items-center gap-1.5 transition-colors"><FastForward size={14} /> Advance</button>
+                    )}
+                    {canApproveHere && r.requisition_type !== "service" && (
                       <>
                         <button onClick={() => act(r.id, "approve")} data-testid={`btn-approve-${r.requisition_no}`}
                           className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 flex items-center gap-1.5 transition-colors"><Check size={14} /> Approve</button>
@@ -143,10 +163,20 @@ export default function RequisitionList({ scope }) {
                   </div>
                 </div>
 
-                {canApproveHere && (
+                {(canApproveHere || detail.requisition_type === "product") && (
                   <div className="flex gap-3 pt-2">
-                    <button onClick={() => act(detail.id, "approve")} className="flex-1 py-2.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 transition-colors">Approve</button>
-                    <button onClick={() => act(detail.id, "reject")} className="flex-1 py-2.5 rounded-lg bg-red-600 text-white font-semibold hover:bg-red-700 transition-colors">Reject</button>
+                    {detail.requisition_type === "product" && (
+                      <button onClick={() => openPdf(detail.id)} data-testid="dialog-pdf-btn" className="px-4 py-2.5 rounded-lg border border-slate-300 text-slate-600 font-semibold hover:bg-slate-50 transition-colors flex items-center gap-2"><FileText size={16} /> Purchase PDF</button>
+                    )}
+                    {canApproveHere && detail.requisition_type === "service" && (
+                      <button onClick={() => serviceAdvance(detail.id)} data-testid="dialog-advance-btn" className="flex-1 py-2.5 rounded-lg bg-sky-600 text-white font-semibold hover:bg-sky-700 transition-colors">Advance Service Stage</button>
+                    )}
+                    {canApproveHere && detail.requisition_type !== "service" && (
+                      <>
+                        <button onClick={() => act(detail.id, "approve")} className="flex-1 py-2.5 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700 transition-colors">Approve</button>
+                        <button onClick={() => act(detail.id, "reject")} className="flex-1 py-2.5 rounded-lg bg-red-600 text-white font-semibold hover:bg-red-700 transition-colors">Reject</button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
