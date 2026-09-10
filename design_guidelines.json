@@ -1,0 +1,178 @@
+{
+  "theme_strategy": {
+    "primary_mode": "dark_sidebar_light_content",
+    "description": "Executive High-Contrast ERP Hybrid: Deep Navy structural rail (#0B1329 / #0F172A) paired with a crisp warm cream/bone-white content workspace (#F8FAFC / #F1F5F9). Accentuated by Warm Industrial Amber/Ochre (#D97706 / #F59E0B / #B45309) for active states, key CTAs, and level badges. Built faithfully to the screenshot specifications.",
+    "toggle_mode_support": true,
+    "dark_content_mode_support": true
+  },
+  "typography": {
+    "font_families": {
+      "headings": "Outfit, -apple-system, BlinkMacSystemFont, sans-serif",
+      "body": "Plus Jakarta Sans, Inter, sans-serif",
+      "mono_and_codes": "JetBrains Mono, Menlo, Consolas, monospace"
+    },
+    "scale_hierarchy": {
+      "h1_page_title": "text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100",
+      "h2_card_title": "text-lg sm:text-xl font-semibold tracking-tight text-slate-900 dark:text-slate-100",
+      "h3_section_subtitle": "text-sm sm:text-base font-semibold tracking-normal text-slate-700 dark:text-slate-300",
+      "h4_field_group": "text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400",
+      "body_regular": "text-sm font-normal leading-relaxed text-slate-700 dark:text-slate-300",
+      "body_muted": "text-xs font-normal leading-normal text-slate-500 dark:text-slate-400",
+      "code_pill": "font-mono text-xs font-medium tracking-tight px-2 py-0.5 rounded bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-amber-400 border border-slate-200 dark:border-slate-700"
+    },
+    "rules": [
+      "Never exceed text-3xl for enterprise dashboard headers to avoid visual screaming.",
+      "Requisition codes, IDs, and financial amounts (BDT) must always use font-mono for tabular visual alignment.",
+      "Overline labels on forms and KPI tiles must use uppercase with tracking-wider and text-xs."
+    ]
+  },
+  "colors": {
+    "palette": {
+      "sidebar_deep_navy": "#070E20",
+      "sidebar_surface_navy": "#0C1733",
+      "sidebar_border": "#1E293B",
+      "sidebar_text_muted": "#94A3B8",
+      "sidebar_text_hover": "#F8FAFC",
+      "sidebar_active_bg": "#D97706",
+      "sidebar_active_text": "#FFFFFF",
+      "accent_amber": "#F59E0B",
+      "accent_amber_dark": "#D97706",
+      "accent_amber_glow": "rgba(245, 158, 11, 0.18)",
+      "canvas_light_bg": "#F8FAFC",
+      "canvas_card_bg": "#FFFFFF",
+      "canvas_card_border": "#E2E8F0",
+      "canvas_text_primary": "#0F172A",
+      "canvas_text_secondary": "#475569",
+      "canvas_text_muted": "#64748B",
+      "status_success_bg": "#DCFCE7",
+      "status_success_text": "#15803D",
+      "status_warning_bg": "#FEF3C7",
+      "status_warning_text": "#B45309",
+      "status_danger_bg": "#FEE2E2",
+      "status_danger_text": "#B91C1C",
+      "status_info_bg": "#E0F2FE",
+      "status_info_text": "#0369A1"
+    },
+    "contrast_matrix": {
+      "sidebar_active": "Amber (#D97706) with crisp White text: APCA compliant (4.6:1+ WCAG AA).",
+      "sidebar_inactive": "Slate-400 (#94A3B8) on Deep Navy (#070E20): 5.8:1 contrast.",
+      "pill_yes_badge": "Soft Emerald Green (#DCFCE7 bg with #15803D text) for 'CAN RAISE PR' table column.",
+      "approval_priority_badge": "Deep Amber (#F59E0B) with dark badge outline for 'Level 01 - Department Head'."
+    }
+  },
+  "layouts_and_grids": {
+    "shell_structure": {
+      "sidebar": "Fixed left rail, width 260px (collapsible to 72px icon mode or mobile slide-out drawer). Background: Deep Navy (#070E20).",
+      "header": "Top sticky navigation bar (h-16), background #FFFFFF / #0F172A with border-b border-slate-200 dark:border-slate-800. Non-transparent background with backdrop blur.",
+      "main_workspace": "calc(100vw - 260px) flex-1 min-h-screen bg-[#F8FAFC] dark:bg-[#0B132B] p-6 lg:p-8 overflow-y-auto"
+    },
+    "page_layouts": {
+      "new_requisition_form": {
+        "header_card": "Deep Navy dark card (#0C1733) with crisp white heading 'New Requisition', auto-generated Requisition ID pill 'REQ-2026-0842', Requisitioner pill with Avatar, and Requisition Date.",
+        "form_grid": "Grid 12-cols: Left 8-cols for Requisition Particulars + Items Table + Requester Note; Right 4-cols for Approval Priority Chain + Attachments Upload + Submission Summary.",
+        "item_entry_row": "Inline responsive form: Requisition Type (Product/Service), Product Type (Asset/Consumable), Product Name input, Quantity counter, Remarks, and an Amber 'Add Product' Button.",
+        "items_table": "Card with interactive items table (or empty state illustration when 0 items added), subtotal calculator, and remove row action."
+      },
+      "users_and_roles_table": {
+        "toolbar": "Search filter input, Role dropdown filter, Department dropdown filter, and Amber 'New User' modal trigger button.",
+        "table_grid": "Columns: NAME (with avatar + user title), EMAIL, DEPARTMENT, ROLE, CAN RAISE PR (Badge: Yes/No), ACTIONS (Edit icon, Delete icon, Permissions key icon)."
+      },
+      "approval_chain_card": {
+        "hierarchy_timeline": "Vertical step indicators showing Level 01: Dept Head -> Level 02: IT Head -> Level 03: Accounts -> Level 04: MD (if >= 50k BDT) -> Level 05: Purchase Head. Service bypass logic visually highlighted."
+      }
+    }
+  },
+  "visual_enhancers": {
+    "card_styles": "Clean 1px borders (border-slate-200/80 dark:border-slate-800), rounded-xl, subtle layered shadow (shadow-sm hover:shadow-md transition-shadow duration-200).",
+    "sidebar_keyboard_badges": "Custom kbd badge tags (e.g., '⌘1', '⌘2' or counter badges) in the sidebar items as seen in modern operator cockpits.",
+    "approval_pill": "Rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wider inline-flex items-center gap-1.5",
+    "active_indicator": "Left-accent 3px solid #F59E0B bar or rounded amber background button (#D97706) with crisp white icon."
+  },
+  "component_hierarchy": [
+    {
+      "name": "SidebarNav",
+      "path": "src/components/layout/SidebarNav.js",
+      "role": "Collapsible tree navigation, brand header (IMS - Inventory & Requisition), dynamic role-based filtering (Admin, IT Head, Dept Head, Employee, Purchase Head, Accounts), keyboard shortcuts badges, active state indicator."
+    },
+    {
+      "name": "AppHeader",
+      "path": "src/components/layout/AppHeader.js",
+      "role": "Top navbar, breadcrumbs, search shortcut cmd+k, notification popover with pending requisition alerts, signed-in user profile block with role pill."
+    },
+    {
+      "name": "NewRequisitionForm",
+      "path": "src/components/requisitions/NewRequisitionForm.js",
+      "role": "Multi-item dynamic requisition form matching screenshot #2. Auto-generated REQ-2026-XXXX, Product/Service toggle, Asset/Consumable toggle, live add-to-table queue, file attachment dropzone, requester notes, submission action."
+    },
+    {
+      "name": "ApprovalChainVisualizer",
+      "path": "src/components/requisitions/ApprovalChainVisualizer.js",
+      "role": "Dynamic approval path display according to requisition rules: Product follows Dept Head -> IT Head -> Accounts -> MD (if >= 50k BDT) -> Purchase Head; Service directs straight to IT Dept Head."
+    },
+    {
+      "name": "UsersRolesTable",
+      "path": "src/components/users/UsersRolesTable.js",
+      "role": "Full CRUD management table matching screenshot #3. Search, filter by department/role, 'CAN RAISE PR' pill badge, add user dialog, edit user permissions drawer."
+    },
+    {
+      "name": "RequisitionList",
+      "path": "src/components/requisitions/RequisitionList.js",
+      "role": "Tabbed view of requisitions (All, Pending Approval, Approved, In Purchase, Delivered, Rejected) with real-time status pills and quick approval actions."
+    },
+    {
+      "name": "DashboardOverview",
+      "path": "src/components/dashboard/DashboardOverview.js",
+      "role": "Executive metrics: Total Pending Requisitions, High Value Requests (>= 50k BDT), My Approvals Queue, Monthly Asset Spend, and Quick Actions."
+    }
+  ],
+  "image_urls": [
+    {
+      "category": "user_avatars",
+      "image_url": "https://images.unsplash.com/photo-1600878459138-e1123b37cb30?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHw0fHxwcm9mZXNzaW9uYWwlMjBjb3Jwb3JhdGUlMjBoZWFkc2hvdHxlbnwwfHx8fDE3ODkwMzMzMjl8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Corporate executive portrait for IT Head & Admin profile / requisitioner avatar",
+      "usage_component": "AppHeader / UsersRolesTable"
+    },
+    {
+      "category": "user_avatars",
+      "image_url": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBjb3Jwb3JhdGUlMjBoZWFkc2hvdHxlbnwwfHx8fDE3ODkwMzMzMjl8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Department Head portrait for Approval Priority Level 01 card",
+      "usage_component": "ApprovalChainVisualizer / NewRequisitionForm"
+    },
+    {
+      "category": "user_avatars",
+      "image_url": "https://images.unsplash.com/photo-1701096374092-bb70915fdc5c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NjZ8MHwxfHNlYXJjaHwzfHxwcm9mZXNzaW9uYWwlMjBjb3Jwb3JhdGUlMjBoZWFkc2hvdHxlbnwwfHx8fDE3ODkwMzMzMjl8MA&ixlib=rb-4.1.0&q=85",
+      "description": "Accounts Manager avatar for Level 03 approval chain node",
+      "usage_component": "ApprovalChainVisualizer"
+    },
+    {
+      "category": "workspace_context",
+      "image_url": "https://images.unsplash.com/photo-1556761175-4b46a572b786?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzN8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBvZmZpY2UlMjB3b3Jrc3BhY2UlMjB0ZWFtfGVufDB8fHx8MTc4OTAzMzMyNnww&ixlib=rb-4.1.0&q=85",
+      "description": "Modern IT workspace office background for empty states and requisition onboarding preview",
+      "usage_component": "DashboardOverview / EmptyStateIllustration"
+    }
+  ],
+  "accessibility_and_contrast": {
+    "wcag_level": "WCAG AA / APCA verified",
+    "keyboard_nav": "Full arrow and tab indexing across sidebar collapsible sections and table action dropdowns",
+    "color_blind_support": "Status badges must feature both an icon (Check, Clock, X, AlertCircle) and text label, not color alone",
+    "test_id_convention": "All inputs, action buttons, table rows, and status indicators must carry semantic data-testid attributes (e.g. data-testid=\"btn-add-product\", data-testid=\"input-req-type\", data-testid=\"table-users-row-1\")"
+  },
+  "instructions_to_main_agent": [
+    "1. Adhere strictly to the attached screenshot layouts: Dark navy sidebar navigation, clean light cream/slate workspace, deep navy card header for New Requisition, and warm amber (#D97706 / #F59E0B) for active items & primary buttons.",
+    "2. Implement dynamic role-based navigation: Menu groups (Dashboard, Requisition, Stock, Purchase, Handover, Approvals, Organization). Admin sees all, Dept Head sees Approvals & Department Requisitions, Regular Employee sees New Requisition & My Requisitions.",
+    "3. New Requisition Form: Support adding multiple items before final submit. Fields must match: Requisition Type (Product/Service), Product Type (Asset/Consumable), Product Name, Quantity (with increment/decrement buttons), Remarks, and 'Add Product' button.",
+    "4. Auto-generate Requisition Number in format 'REQ-2026-XXXX' (e.g., REQ-2026-0842) with a distinct monospace pill in the navy header.",
+    "5. Approval Chain Visualizer: Implement dynamic rule calculation - Product goes to Dept Head -> IT Head -> Accounts -> MD (if total amount >= 50,000 BDT) -> Purchase Head. Service requisitions direct straight to IT Dept Head.",
+    "6. Users & Roles Table: Replicate the table from screenshot #3 with NAME, EMAIL, DEPARTMENT, ROLE, CAN RAISE PR (emerald badge 'Yes' / gray badge 'No'), and action buttons (Edit, Delete, Role Permissions). Include search and filter by department.",
+    "7. Mock data must be comprehensive and realistic: Include IT assets (MacBook Pro M3, Dell UltraSharp 27 Monitor, Ergonomic Chair, Cisco Switch) and consumables (Cat6 Cables, Wireless Mouse, Toner Cartridge).",
+    "8. Use Sonner toasts for instant feedback upon adding products, submitting requisitions, changing user permissions, and approving requests.",
+    "9. Use .js and .jsx files with Tailwind CSS classes. Do not use TypeScript .tsx files as this project is configured for pure JavaScript React.",
+    "10. Ensure EVERY button, input, badge, table row, and tab includes an explicit data-testid attribute for automated testing."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": {
+    "anti_ai_slop": "Avoid generic SaaS blue dashboards. Stick faithfully to the screenshot's distinctive Deep Navy (#070E20) and Amber (#D97706) pairing with high-legibility tabular fonts.",
+    "spacing": "Maintain generous breathing room: p-6 to p-8 inside cards, gap-6 in form grids, and h-12 table row heights.",
+    "transitions": "Use specific transition properties like 'transition-colors duration-150' or 'transition-transform duration-200'. Never use 'transition: all'.",
+    "borders": "Always use subtle 1px borders (border-slate-200 in light, border-slate-800 in dark) to keep panels crisp without looking heavy."
+  }
+}
