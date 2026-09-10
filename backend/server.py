@@ -662,11 +662,13 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
 # ===========================================================================
 import io
 import uuid
+import re
+import base64
 import requests as _requests
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
@@ -1026,15 +1028,34 @@ async def create_handover(payload: HandoverIn, user: dict = Depends(get_current_
         "received_by_sign": payload.received_by_sign, "created_at": now_iso(),
     }
     res = await db.handovers.insert_one(doc)
-    # update linked asset assignment
+    hid = str(res.inserted_id)
+    emp_user = await db.users.find_one({"name": {"$regex": f"^{re.escape(payload.employee_name)}$", "$options": "i"}})
     for it in items:
-        if not it.get("asset_id") or not ObjectId.is_valid(it["asset_id"]):
+        aid = it.get("asset_id")
+        if not aid or not ObjectId.is_valid(aid):
             continue
         if payload.type == "handover":
-            upd = {"status": "assigned", "assigned_to": payload.employee_name, "assigned_department_id": payload.department_id}
+            asset = await db.assets.find_one({"_id": ObjectId(aid)})
+            # Only assets currently in central stock (and not already reserved) can be handed over.
+            if not asset or asset.get("status") != "in_stock" or asset.get("pending_receipt"):
+                continue
+            await db.assets.update_one({"_id": ObjectId(aid)}, {"$set": {
+                "pending_receipt": True, "pending_handover_id": hid,
+                "assigned_to_tentative": payload.employee_name,
+                "assigned_department_id": payload.department_id}})
+            await db.notifications.insert_one({
+                "user_id": str(emp_user["_id"]) if emp_user else None,
+                "employee_name": payload.employee_name, "type": "asset_receipt",
+                "asset_id": aid, "asset_name": (asset or {}).get("name") or it.get("item"),
+                "asset_tag": (asset or {}).get("tag_id") or (asset or {}).get("serial_no"),
+                "handover_id": hid, "slip_no": slip_no,
+                "message": f"Please confirm physical receipt of {(asset or {}).get('name') or it.get('item')}.",
+                "status": "unread", "created_at": now_iso(),
+            })
         else:
-            upd = {"status": "returned", "assigned_to": None, "assigned_department_id": None}
-        await db.assets.update_one({"_id": ObjectId(it["asset_id"])}, {"$set": upd})
+            await db.assets.update_one({"_id": ObjectId(aid)}, {"$set": {
+                "status": "returned", "assigned_to": None, "assigned_department_id": None,
+                "pending_receipt": False, "pending_handover_id": None, "assigned_to_tentative": None}})
     doc["_id"] = res.inserted_id
     return await _enrich_handover(doc)
 
@@ -1042,6 +1063,130 @@ async def create_handover(payload: HandoverIn, user: dict = Depends(get_current_
 async def delete_handover(hid: str, user: dict = Depends(require_roles("super_admin"))):
     await db.handovers.delete_one({"_id": ObjectId(hid)})
     return {"ok": True}
+
+# --------------------------- Notifications ---------------------------------
+class NotifyConfirmIn(BaseModel):
+    action: Literal["received", "pending"]
+
+@api_router.get("/notifications")
+async def list_notifications(user: dict = Depends(get_current_user)):
+    docs = await db.notifications.find({"user_id": str(user["_id"]), "status": {"$in": ["unread", "pending"]}}).sort("created_at", -1).to_list(100)
+    return [strip_id(n) for n in docs]
+
+@api_router.post("/notifications/{nid}/confirm")
+async def confirm_notification(nid: str, payload: NotifyConfirmIn, user: dict = Depends(get_current_user)):
+    n = await db.notifications.find_one({"_id": ObjectId(nid)})
+    if not n:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    if not (n.get("user_id") == str(user["_id"]) or user["role"] == "super_admin"):
+        raise HTTPException(status_code=403, detail="Not your notification")
+    if n.get("status") not in ("unread", "pending"):
+        raise HTTPException(status_code=400, detail="Notification already actioned")
+    aid = n.get("asset_id")
+    if payload.action == "received":
+        # Employee confirmed receipt -> asset leaves central stock (deduct -1) and becomes assigned.
+        if aid and ObjectId.is_valid(aid):
+            await db.assets.update_one({"_id": ObjectId(aid)}, {"$set": {
+                "status": "assigned", "assigned_to": n.get("employee_name"),
+                "receipt_confirmed": True, "receipt_confirmed_at": now_iso(),
+                "pending_receipt": False, "pending_handover_id": None, "assigned_to_tentative": None}})
+        await db.notifications.update_one({"_id": ObjectId(nid)}, {"$set": {"status": "confirmed", "acted_at": now_iso()}})
+        return {"ok": True, "status": "confirmed", "stock_deducted": True}
+    await db.notifications.update_one({"_id": ObjectId(nid)}, {"$set": {"status": "pending", "acted_at": now_iso()}})
+    return {"ok": True, "status": "pending", "stock_deducted": False}
+
+# --------------------------- Handover / Takeover PDF -----------------------
+def _img_from_datauri(uri):
+    try:
+        if not uri or "," not in uri:
+            return None
+        raw = base64.b64decode(uri.split(",", 1)[1])
+        return RLImage(io.BytesIO(raw), width=45 * mm, height=18 * mm)
+    except Exception:
+        return None
+
+def build_handover_pdf(h: dict, dept_name: Optional[str]) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm, leftMargin=16 * mm, rightMargin=16 * mm)
+    styles = getSampleStyleSheet()
+    small = ParagraphStyle("s", parent=styles["Normal"], fontSize=8, leading=10)
+    story = [
+        Paragraph("<b>Primitek Group</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)),
+        Paragraph("Head Office: Primitek Tower, House 43/B, Road 24, Block CWS(B), Gulshan 1, Dhaka-1212, Bangladesh", small),
+        Spacer(1, 8),
+        Paragraph(f"<b>{'HAND OVER' if h['type'] == 'handover' else 'TAKE OVER'}</b>", ParagraphStyle("c", parent=styles["Heading2"], alignment=1)),
+        Spacer(1, 6),
+    ]
+    meta = Table([["Slip No.", ": " + h["slip_no"], "Date", ": " + (h.get("handover_date") or "")[:10]],
+                  ["Employee", ": " + h["employee_name"], "Department", ": " + (dept_name or "-")]],
+                 colWidths=[26 * mm, 55 * mm, 26 * mm, 55 * mm])
+    meta.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9)]))
+    story += [meta, Spacer(1, 8)]
+    rows = [["SL", "Item / Description", "Brand", "Qty", "Remarks"]]
+    for i, it in enumerate(h.get("items", []), 1):
+        rows.append([str(i), Paragraph(it.get("item", ""), small), it.get("brand") or "-", str(it.get("quantity", 1)), Paragraph(it.get("remarks") or "-", small)])
+    t = Table(rows, colWidths=[10 * mm, 78 * mm, 30 * mm, 14 * mm, 35 * mm])
+    t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")), ("FONTSIZE", (0, 0), (-1, -1), 8), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    story += [t, Spacer(1, 8)]
+    if h.get("note"):
+        story.append(Paragraph(f"<b>Note:</b> {h['note']}", small))
+    story.append(Paragraph("Note: You are responsible for the proper care, handling, and safekeeping of the assigned IT Equipment. In case of any damage, loss, or theft while the device is under your custody, you will bear full responsibility. You are also required to return the IT Equipment in good condition upon request or when your assignment/employment ends.", small))
+    story.append(Spacer(1, 16))
+    prep = _img_from_datauri(h.get("prepared_by_sign")) or Paragraph(" ", small)
+    recv = _img_from_datauri(h.get("received_by_sign")) or Paragraph(" ", small)
+    sig = Table([[prep, recv, Paragraph(" ", small)], ["Prepared By (IT Staff)", "Received By (Employee)", "Checked By"]],
+                colWidths=[58 * mm, 58 * mm, 42 * mm])
+    sig.setStyle(TableStyle([("LINEABOVE", (0, 1), (-1, 1), 0.5, colors.black), ("FONTSIZE", (0, 0), (-1, -1), 8), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, 0), "BOTTOM")]))
+    story.append(sig)
+    doc.build(story)
+    return buf.getvalue()
+
+@api_router.get("/handovers/{hid}/pdf")
+async def handover_pdf(hid: str, request: Request, auth: Optional[str] = None):
+    token = request.cookies.get("access_token") or auth
+    if not token or not await user_from_token(token):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    h = await db.handovers.find_one({"_id": ObjectId(hid)})
+    if not h:
+        raise HTTPException(status_code=404, detail="Not found")
+    dept_name = None
+    if h.get("department_id") and ObjectId.is_valid(h["department_id"]):
+        dp = await db.departments.find_one({"_id": ObjectId(h["department_id"])})
+        dept_name = dp["name"] if dp else None
+    pdf = build_handover_pdf(h, dept_name)
+    return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{h["slip_no"]}.pdf"'})
+
+# --------------------------- Assigned assets summary PDF -------------------
+def build_assets_summary_pdf(assets: list) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm, leftMargin=14 * mm, rightMargin=14 * mm)
+    styles = getSampleStyleSheet()
+    small = ParagraphStyle("s", parent=styles["Normal"], fontSize=8, leading=10)
+    story = [
+        Paragraph("<b>Primitek Group</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)),
+        Paragraph("Assigned Assets — Equipment History Summary", small),
+        Paragraph(f"Generated: {now_iso()[:19].replace('T', ' ')} UTC", small), Spacer(1, 8),
+    ]
+    rows = [["#", "Asset", "Serial No.", "Tag / ID", "Category", "Status", "Assigned To"]]
+    for i, a in enumerate(assets, 1):
+        rows.append([str(i), Paragraph(a.get("name", ""), small), a.get("serial_no") or "-", a.get("tag_id") or "-",
+                     a.get("category_name") or "-", (a.get("status") or "").replace("_", " "), a.get("assigned_to") or "-"])
+    t = Table(rows, colWidths=[8 * mm, 42 * mm, 28 * mm, 28 * mm, 26 * mm, 24 * mm, 26 * mm])
+    t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")), ("FONTSIZE", (0, 0), (-1, -1), 7.5), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    story.append(t)
+    doc.build(story)
+    return buf.getvalue()
+
+@api_router.get("/assets/summary/pdf")
+async def assets_summary_pdf(request: Request, status: Optional[str] = None, auth: Optional[str] = None):
+    token = request.cookies.get("access_token") or auth
+    if not token or not await user_from_token(token):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    q = {"status": status} if status else {}
+    docs = await db.assets.find(q).sort("assigned_to", 1).to_list(1000)
+    enriched = [await _enrich_asset(a) for a in docs]
+    return Response(content=build_assets_summary_pdf(enriched), media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="assigned-assets-summary.pdf"'})
 
 
 # ---------------------------------------------------------------------------

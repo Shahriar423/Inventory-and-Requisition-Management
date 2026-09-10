@@ -38,9 +38,15 @@ Super Admin, Dept Head, Executive, Accounts, MD (Managing Director), Purchase He
 - **Stock GRN & asset tagging**: `/api/grns` captures vendor challan + per-unit serial/tag, creating tagged asset records (GRN-####). Stock List and Assigned Assets pages render assets and per-employee custody.
 - Dashboard now includes asset counts. **Verified**: 34/34 backend tests + all Step 2 frontend flows at 100%.
 
-## Backlog / Remaining (P1/P2)
-- **P2 Router split**: server.py is large; split into modules before further growth.
-- **P2 Handover guards**: validate asset is in_stock before assigning; match employee on takeover.
-- **P2 Signed download tokens** instead of `?auth=` JWT query fallback.
-- **P2 Approver Management** UI could also reorder/override approval chain approvers.
-- **P2 Notifications** for pending approvals.
+## Implemented — Step 3 & 4 (2026-09-10)
+- **Navbar notifications (25s polling)**: `NotificationBell` polls `/api/notifications`; on asset handover the recipient gets a receipt-confirmation modal with **[Yes, Received & Signed]** / **[No, Pending]**. Central stock is deducted (asset in_stock → assigned) ONLY on Yes; No keeps it pending and re-prompts. Confirm is idempotent; only in-stock assets can be handed over.
+- **Digital signature pads**: IT Staff (Prepared By) + Employee (Received By) canvas signatures captured on Handover/Takeover, stored as base64.
+- **Primitek print templates**: Purchase Requisition PDF + NEW Handover/Takeover slip PDF (`/api/handovers/{id}/pdf`) with embedded signature images and the official terms; verified visually.
+- **Equipment History UI**: Assigned Assets page with search + status filter, grouped per employee, and a **Download Summary Report** button → server-generated `/api/assets/summary/pdf`.
+- **Integration sweep**: all 15 sidebar routes render; all FastAPI endpoints wired. **Verified**: 40/40 backend tests + all Step 3/4 frontend flows at 100%.
+
+## Backlog / Remaining (P2)
+- **Router split**: server.py (~1300 lines) into modules.
+- **Signed download tokens** instead of `?auth=` JWT query fallback.
+- **Notification targeting** by user_id/email captured at handover time (currently matches by employee name).
+- **Multi-notification stacking** in the bell modal; HiDPI signature canvas.

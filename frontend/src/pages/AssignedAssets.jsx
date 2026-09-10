@@ -1,14 +1,23 @@
 import { useEffect, useState } from "react";
-import { User, Laptop, PackageOpen } from "lucide-react";
-import api from "@/lib/apiClient";
+import { User, Laptop, PackageOpen, Search, FileDown } from "lucide-react";
+import api, { API } from "@/lib/apiClient";
 
 export default function AssignedAssets() {
   const [assets, setAssets] = useState([]);
+  const [q, setQ] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
 
   useEffect(() => { api.get("/assets").then(({ data }) => setAssets(data)).catch(() => {}); }, []);
 
-  const assigned = assets.filter((a) => a.status === "assigned" && a.assigned_to);
-  const stock = assets.filter((a) => a.status !== "assigned");
+  const match = (a) => {
+    const text = [a.name, a.serial_no, a.tag_id, a.category_name, a.assigned_to].filter(Boolean).join(" ").toLowerCase();
+    if (q && !text.includes(q.toLowerCase())) return false;
+    if (statusFilter && a.status !== statusFilter) return false;
+    return true;
+  };
+  const filtered = assets.filter(match);
+  const assigned = filtered.filter((a) => a.status === "assigned" && a.assigned_to);
+  const stock = filtered.filter((a) => a.status !== "assigned");
   const byEmployee = assigned.reduce((acc, a) => {
     (acc[a.assigned_to] = acc[a.assigned_to] || []).push(a);
     return acc;
@@ -16,9 +25,28 @@ export default function AssignedAssets() {
 
   return (
     <div className="space-y-6" data-testid="assigned-assets-page">
-      <div>
-        <h2 className="font-head text-2xl font-bold text-slate-900">Assigned Assets</h2>
-        <p className="text-slate-500 text-sm mt-1">IT equipment currently in the custody of employees.</p>
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+        <div>
+          <h2 className="font-head text-2xl font-bold text-slate-900">Assigned Assets</h2>
+          <p className="text-slate-500 text-sm mt-1">Equipment history — IT equipment in the custody of employees.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input data-testid="assets-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search assets / employees…"
+              className="pl-9 pr-4 py-2.5 rounded-lg border border-slate-300 focus:border-amber-500 outline-none text-sm w-64" />
+          </div>
+          <select data-testid="assets-status-filter" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}
+            className="py-2.5 px-3 rounded-lg border border-slate-300 focus:border-amber-500 outline-none text-sm">
+            <option value="">All statuses</option>
+            <option value="in_stock">In stock</option>
+            <option value="pending_receipt">Pending receipt</option>
+            <option value="assigned">Assigned</option>
+            <option value="returned">Returned</option>
+          </select>
+          <button onClick={() => window.open(`${API}/assets/summary/pdf`, "_blank")} data-testid="btn-download-summary"
+            className="px-4 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-sm flex items-center gap-2 transition-colors"><FileDown size={16} /> Download Summary Report</button>
+        </div>
       </div>
 
       {Object.keys(byEmployee).length === 0 && (

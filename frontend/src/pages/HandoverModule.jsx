@@ -115,8 +115,8 @@ export default function HandoverModule() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <SignaturePad label="Prepared By (signature)" testid="ho-sign-prepared" onChange={setPrepSign} />
-          <SignaturePad label="Received By (signature)" testid="ho-sign-received" onChange={setRecvSign} />
+          <SignaturePad label="IT Staff Signature (Prepared By)" testid="ho-sign-prepared" onChange={setPrepSign} />
+          <SignaturePad label="Employee Signature (Received By)" testid="ho-sign-received" onChange={setRecvSign} />
         </div>
 
         <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 text-xs text-slate-500">

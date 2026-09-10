@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Eye, Handshake, ArrowLeftRight } from "lucide-react";
-import api from "@/lib/apiClient";
+import { Eye, Handshake, ArrowLeftRight, FileText } from "lucide-react";
+import api, { API } from "@/lib/apiClient";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 export default function HandoverRecords() {
@@ -36,7 +36,10 @@ export default function HandoverRecords() {
                 <td className="px-6 py-3 text-slate-600">{h.items.length}</td>
                 <td className="px-6 py-3 text-slate-500">{(h.handover_date || "").slice(0, 10)}</td>
                 <td className="px-6 py-3 text-right">
-                  <button onClick={() => setDetail(h)} data-testid={`ho-view-${h.slip_no}`} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors ml-auto"><Eye size={14} /> View</button>
+                  <div className="flex items-center justify-end gap-2">
+                    <button onClick={() => window.open(`${API}/handovers/${h.id}/pdf`, "_blank")} data-testid={`ho-pdf-${h.slip_no}`} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors"><FileText size={14} /> PDF</button>
+                    <button onClick={() => setDetail(h)} data-testid={`ho-view-${h.slip_no}`} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors"><Eye size={14} /> View</button>
+                  </div>
                 </td>
               </tr>
             ))}
