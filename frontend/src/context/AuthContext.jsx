@@ -34,7 +34,16 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     const { data } = await api.post("/auth/login", { email, password });
+    // Prefer the login payload if it already includes enriched fields; then refresh
+    // from /auth/me so department_name / role_label_display are always present
+    // immediately (no page refresh required on New Requisition, Header, etc.).
     setUser(data.user);
+    try {
+      const me = await api.get("/auth/me");
+      setUser(me.data);
+    } catch (e) {
+      /* keep login user if /me fails */
+    }
     await loadPermissions();
     return data.user;
   };

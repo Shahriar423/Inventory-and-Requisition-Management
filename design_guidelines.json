@@ -92,7 +92,7 @@
     {
       "name": "SidebarNav",
       "path": "src/components/layout/SidebarNav.js",
-      "role": "Collapsible tree navigation, brand header (IMS - Inventory & Requisition), dynamic role-based filtering (Admin, IT Head, Dept Head, Employee, Purchase Head, Accounts), keyboard shortcuts badges, active state indicator."
+      "role": "Collapsible tree navigation, brand header (IRM - Inventory & Requisition), dynamic role-based filtering (Admin, IT Head, Dept Head, Employee, Purchase Head, Accounts), keyboard shortcuts badges, active state indicator."
     },
     {
       "name": "AppHeader",

@@ -1,0 +1,672 @@
+--- a/src/pages/HandoverModule.jsx
++++ b/src/pages/HandoverModule.jsx
+@@ -1,13 +1,23 @@
+ import { useCallback, useEffect, useMemo, useState } from "react";
+ import { useNavigate } from "react-router-dom";
+ import { toast } from "sonner";
+-import { Plus, Trash2, Handshake, ArrowLeftRight, Wand2, AlertCircle, CheckCircle2 } from "lucide-react";
++import { Plus, Trash2, Handshake, ArrowLeftRight, RefreshCw, Wand2, AlertCircle, CheckCircle2 } from "lucide-react";
+ import api, { formatApiErrorDetail } from "@/lib/apiClient";
+ import SignaturePad from "@/components/SignaturePad";
+ 
++// The slip type is never chosen by the user - it follows from what is on the slip.
++const TYPE_META = {
++  handover: { label: "New allocation", sub: "Hand Over", cls: "bg-emerald-100 text-emerald-700", Icon: Handshake },
++  takeover: { label: "Return", sub: "Take Over", cls: "bg-sky-100 text-sky-700", Icon: ArrowLeftRight },
++  swap: { label: "Replacement", sub: "Take Over + Hand Over", cls: "bg-amber-100 text-amber-700", Icon: RefreshCw },
++};
++const CONDITIONS = [["good", "Good"], ["damaged", "Damaged"], ["missing_parts", "Missing parts"]];
++const DESTINATIONS = [["in_stock", "Back to stock"], ["under_repair", "Under repair"], ["scrapped", "Scrap"]];
++const ACCESSORIES = ["Charger", "Bag", "Mouse"];
++const DEFAULT_RETURN = { condition: "good", next_status: "in_stock", accessories: [], data_wiped: false };
++
+ export default function HandoverModule() {
+   const navigate = useNavigate();
+-  const [type, setType] = useState("handover");
+   const [emp, setEmp] = useState("");            // employee display name
+   const [empId, setEmpId] = useState("");          // employee user id (picked from list)
+   const [users, setUsers] = useState([]);
+@@ -25,6 +35,10 @@
+   const [prepSign, setPrepSign] = useState(null);
+   const [recvSign, setRecvSign] = useState(null);
+   const [saving, setSaving] = useState(false);
++  const [held, setHeld] = useState([]);              // assets the chosen employee holds right now
++  const [heldLoading, setHeldLoading] = useState(false);
++  const [returnSel, setReturnSel] = useState({});    // asset_id -> {condition,next_status,accessories,data_wiped}
++  const [receiveNow, setReceiveNow] = useState(true);
+ 
+   const load = useCallback(async () => {
+     const [d, s, r, u] = await Promise.all([
+@@ -37,7 +51,38 @@
+   }, []);
+   useEffect(() => { load().catch(() => {}); }, [load]);
+ 
+-  const isHandover = type === "handover";
++  // Employee first: whenever the employee changes, load what they currently hold.
++  useEffect(() => {
++    setReturnSel({});
++    if (!empId) { setHeld([]); return undefined; }
++    let live = true;
++    setHeldLoading(true);
++    api.get(`/users/${empId}/held-assets`)
++      .then(({ data }) => { if (live) setHeld(data.assets || []); })
++      .catch((e) => { if (live) { setHeld([]); toast.error(formatApiErrorDetail(e.response?.data?.detail)); } })
++      .finally(() => { if (live) setHeldLoading(false); });
++    return () => { live = false; };
++  }, [empId]);
++
++  const returnIds = Object.keys(returnSel);
++  const type = lines.length > 0 && returnIds.length > 0 ? "swap" : returnIds.length > 0 ? "takeover" : "handover";
++  const hasAnything = lines.length > 0 || returnIds.length > 0;
++  const meta = TYPE_META[type];
++
++  const toggleReturn = (a) => setReturnSel((m) => {
++    const n = { ...m };
++    if (n[a.id]) delete n[a.id]; else n[a.id] = { ...DEFAULT_RETURN };
++    return n;
++  });
++  const returnAll = () => setReturnSel(Object.fromEntries(held.filter((a) => !a.return_pending).map((a) => [a.id, { ...DEFAULT_RETURN }])));
++  const setRet = (id, patch) => setReturnSel((m) => ({ ...m, [id]: { ...m[id], ...patch } }));
++  // Picking a condition suggests where the device should go; IT can still override it.
++  const onCondition = (id, c) => setRet(id, { condition: c, next_status: c === "good" ? "in_stock" : "under_repair" });
++  const toggleAcc = (id, acc) => setReturnSel((m) => {
++    const cur = m[id];
++    const has = cur.accessories.includes(acc);
++    return { ...m, [id]: { ...cur, accessories: has ? cur.accessories.filter((x) => x !== acc) : [...cur.accessories, acc] } };
++  });
+   const prod = catalog.find((c) => c.id === entry.product_id) || null;
+ 
+   const loadUnits = useCallback(async (pid) => {
+@@ -52,17 +97,26 @@
+   const freeUnits = prod ? (unitsByProduct[prod.id]?.units || []).filter((u) => !usedIds.has(u.id)) : [];
+   const byQty = !!prod?.tracked_by_quantity;
+   const unitsLoaded = !!(prod && unitsByProduct[prod.id]);
+-  const available = !prod ? 0 : !isHandover ? Infinity : byQty ? prod.in_stock - onSlipQty(prod.id) : unitsLoaded ? freeUnits.length : prod.in_stock;
++  const available = !prod ? 0 : byQty ? prod.in_stock - onSlipQty(prod.id) : unitsLoaded ? freeUnits.length : prod.in_stock;
+   const qtyN = Math.max(parseInt(entry.quantity, 10) || 0, 0);
+-  const shortMsg = prod && isHandover && qtyN > available ? `Only ${available} ${prod.name} in stock, you asked for ${qtyN}.` : null;
++  const shortMsg = prod && qtyN > available ? `Only ${available} ${prod.name} in stock, you asked for ${qtyN}.` : null;
+ 
+   const onProductPick = async (pid) => {
+     const p = catalog.find((c) => c.id === pid);
+     setEntry({ product_id: pid, quantity: 1, remarks: "", picked: [], brand: p?.brand || "" });
+-    if (pid && isHandover && !p?.tracked_by_quantity) {
++    if (pid && !p?.tracked_by_quantity) {
+       try { await loadUnits(pid); } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
+     }
+   };
++  // "Replace": tick the old asset for return and jump to the issue picker with the same product.
++  const replaceAsset = async (a) => {
++    setReturnSel((m) => ({ ...m, [a.id]: m[a.id] || { ...DEFAULT_RETURN } }));
++    const p = catalog.find((c) => c.name.trim().toLowerCase() === (a.name || "").trim().toLowerCase());
++    if (!p) toast.info("Return ticked - pick the replacement product below.");
++    else if (p.in_stock <= 0) toast.error(`No ${p.name} in stock to issue as a replacement.`);
++    else await onProductPick(p.id);
++    document.getElementById("ho-issue-section")?.scrollIntoView({ behavior: "smooth", block: "center" });
++  };
+   const onQty = (v) => setEntry((e) => ({ ...e, quantity: v, picked: e.picked.slice(0, Math.max(parseInt(v, 10) || 0, 0)) }));
+   const togglePick = (uid) => setEntry((e) => {
+     if (e.picked.includes(uid)) return { ...e, picked: e.picked.filter((x) => x !== uid) };
+@@ -80,19 +134,19 @@
+     quantity: 1, asset_id: u.id, tag_id: u.tag_id, serial_no: u.serial_no, tracked_by_quantity: false, remarks: remarks || null,
+   });
+ 
+-  const canAdd = !!prod && qtyN >= 1 && !shortMsg && (!isHandover || byQty || entry.picked.length === qtyN);
++  const canAdd = !!prod && qtyN >= 1 && !shortMsg && (byQty || entry.picked.length === qtyN);
+   const addItem = () => {
+     if (!prod) return toast.error("Select a product");
+     if (qtyN < 1) return toast.error("Quantity must be at least 1");
+     if (shortMsg) return toast.error(shortMsg);
+-    if (isHandover && !byQty) {
++    if (!byQty) {
+       if (entry.picked.length !== qtyN) return toast.error(`Select ${qtyN} unit(s) of ${prod.name} — ${entry.picked.length} selected`);
+       const picked = freeUnits.filter((u) => entry.picked.includes(u.id));
+       setLines((p) => [...p, ...picked.map((u) => unitLine(prod, u, entry.remarks))]);
+     } else {
+       setLines((p) => [...p, {
+         product_id: prod.id, item: prod.name, category_name: prod.category_name, brand: entry.brand || prod.brand || "",
+-        quantity: qtyN, asset_id: null, tag_id: null, serial_no: null, tracked_by_quantity: isHandover && byQty, remarks: entry.remarks || null,
++        quantity: qtyN, asset_id: null, tag_id: null, serial_no: null, tracked_by_quantity: byQty, remarks: entry.remarks || null,
+       }]);
+     }
+     setEntry({ product_id: "", quantity: 1, remarks: "", picked: [], brand: "" });
+@@ -146,7 +200,7 @@
+ 
+   const submit = async () => {
+     if (!empId) return toast.error("Select the employee from the list");
+-    if (lines.length === 0) return toast.error("Add at least one item");
++    if (!hasAnything) return toast.error("Tick an asset to take back, or add an item to issue");
+     if (shortages.length) return toast.error(shortages.map((r) => `${r.name}: ${r.have} of ${r.qty} selected`).join(" · "));
+     setSaving(true);
+     try {
+@@ -154,15 +208,21 @@
+         item: l.item, product_id: l.product_id, brand: l.brand || null, quantity: l.quantity,
+         remarks: l.remarks, asset_id: l.asset_id || null, tracked_by_quantity: !!l.tracked_by_quantity,
+       }));
++      const return_items = returnIds.map((id) => ({ asset_id: id, ...returnSel[id] }));
+       const { data } = await api.post("/handovers", {
+-        type, employee_name: emp, employee_user_id: empId, department_id: deptId || null, items, remarks: remarks || null,
++        employee_name: emp, employee_user_id: empId, department_id: deptId || null, items, return_items,
++        receive_now: return_items.length > 0 && receiveNow, remarks: remarks || null,
+         note: note || null, prepared_by_sign: prepSign, received_by_sign: recvSign,
+         requisition_id: reqId || null,
+       });
+-      toast.success(`${data.slip_no} recorded`);
++      toast.success(`${data.slip_no} recorded - ${(TYPE_META[data.type] || meta).label}`);
+       navigate("/handover/records");
+-    } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); load().catch(() => {}); }
+-    finally { setSaving(false); }
++    } catch (e) {
++      toast.error(formatApiErrorDetail(e.response?.data?.detail));
++      load().catch(() => {});
++      // the employee's holdings may have changed under us - refresh them
++      if (empId) api.get(`/users/${empId}/held-assets`).then(({ data }) => setHeld(data.assets || [])).catch(() => {});
++    } finally { setSaving(false); }
+   };
+ 
+   return (
+@@ -170,16 +230,15 @@
+       <div className="flex flex-wrap items-end justify-between gap-3">
+         <div>
+           <h2 className="font-head text-2xl font-bold text-slate-900">Handover</h2>
+-          <p className="text-slate-500 text-sm mt-0.5">Create a Hand Over / Take Over slip with digital signatures.</p>
++          <p className="text-slate-500 text-sm mt-0.5">Pick the employee first - the slip becomes a Hand Over, Take Over or Replacement based on what you select.</p>
+         </div>
+-        <div className="flex gap-2">
+-          <button onClick={() => { setType("handover"); setLines([]); setEntry({ product_id: "", quantity: 1, remarks: "", picked: [], brand: "" }); }} data-testid="ho-type-handover" className={`px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition-colors ${type === "handover" ? "bg-amber-600 text-white" : "bg-white border border-slate-300 text-slate-600"}`}><Handshake size={16} /> Hand Over</button>
+-          <button onClick={() => { setType("takeover"); setReqId(""); setRequired({}); setLines([]); setEntry({ product_id: "", quantity: 1, remarks: "", picked: [], brand: "" }); }} data-testid="ho-type-takeover" className={`px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition-colors ${type === "takeover" ? "bg-amber-600 text-white" : "bg-white border border-slate-300 text-slate-600"}`}><ArrowLeftRight size={16} /> Take Over</button>
++        <div data-testid="ho-type-badge" className={`px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 ${hasAnything ? meta.cls : "bg-slate-100 text-slate-500"}`}>
++          {hasAnything ? <><meta.Icon size={16} /> {meta.label} <span className="font-normal opacity-75">· {meta.sub}</span></> : "Type is detected automatically"}
+         </div>
+       </div>
+ 
+       <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4">
+-        {type === "handover" && (
++        {(
+           <Field label="Link to Requisition (optional)">
+             <select data-testid="ho-requisition" value={reqId} onChange={(e) => onReqPick(e.target.value)} className="hinp">
+               <option value="">— none — (not fulfilling a specific requisition)</option>
+@@ -221,7 +280,84 @@
+           </Field>
+         </div>
+ 
+-        <div className="border-t border-slate-100 pt-4 space-y-3">
++        {empId && (
++          <div className="border-t border-slate-100 pt-4 space-y-3" data-testid="ho-held-panel">
++            <div className="flex flex-wrap items-center justify-between gap-2">
++              <div className="text-sm font-semibold text-slate-700">
++                Currently holding {heldLoading ? "…" : <span className="text-slate-400 font-normal">({held.length})</span>}
++              </div>
++              {held.some((a) => !a.return_pending) && (
++                <button type="button" onClick={returnAll} data-testid="ho-return-all"
++                  className="px-3 py-1.5 rounded-lg border border-sky-500 text-sky-700 hover:bg-sky-50 text-xs font-semibold flex items-center gap-1.5">
++                  <ArrowLeftRight size={14} /> Return all assets
++                </button>
++              )}
++            </div>
++            {!heldLoading && held.length === 0 && (
++              <p className="text-sm text-slate-400" data-testid="ho-held-empty">{emp} has no assets right now - anything you issue below is a new allocation.</p>
++            )}
++            {held.length > 0 && (
++              <div className="border border-slate-200 rounded-lg divide-y divide-slate-100">
++                {held.map((a) => {
++                  const sel = returnSel[a.id];
++                  return (
++                    <div key={a.id} data-testid={`ho-held-${a.id}`} className={sel ? "bg-sky-50/60" : ""}>
++                      <div className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm">
++                        <input type="checkbox" checked={!!sel} disabled={a.return_pending} onChange={() => toggleReturn(a)} data-testid={`ho-return-${a.id}`} />
++                        <span className="font-medium text-slate-800 min-w-[7rem]">{a.name}</span>
++                        <span className="font-mono text-slate-700 w-28">{a.tag_id || "—"}</span>
++                        <span className="font-mono text-slate-500 flex-1">S/N {a.serial_no || "—"}</span>
++                        <span className="text-xs text-slate-400">{a.assigned_at ? `since ${a.assigned_at.slice(0, 10)}` : ""}</span>
++                        {a.return_pending ? (
++                          <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-xs font-semibold">Return pending · {a.pending_return_slip_no || "—"}</span>
++                        ) : (
++                          <button type="button" onClick={() => replaceAsset(a)} data-testid={`ho-replace-${a.id}`}
++                            className="px-2.5 py-1 rounded-lg border border-amber-500 text-amber-700 hover:bg-amber-50 text-xs font-semibold flex items-center gap-1.5">
++                            <RefreshCw size={13} /> Replace
++                          </button>
++                        )}
++                      </div>
++                      {sel && (
++                        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_2fr] gap-3 px-3 pb-3 pl-9 text-sm" data-testid={`ho-return-detail-${a.id}`}>
++                          <Field label="Condition">
++                            <select value={sel.condition} onChange={(e) => onCondition(a.id, e.target.value)} className="hinp">
++                              {CONDITIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
++                            </select>
++                          </Field>
++                          <Field label="Then">
++                            <select value={sel.next_status} onChange={(e) => setRet(a.id, { next_status: e.target.value })} className="hinp">
++                              {DESTINATIONS.filter(([v]) => v !== "in_stock" || sel.condition === "good").map(([v, l]) => <option key={v} value={v}>{l}</option>)}
++                            </select>
++                          </Field>
++                          <Field label="Accessories returned">
++                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2">
++                              {ACCESSORIES.map((acc) => (
++                                <label key={acc} className="flex items-center gap-1.5 text-sm text-slate-600 cursor-pointer">
++                                  <input type="checkbox" checked={sel.accessories.includes(acc)} onChange={() => toggleAcc(a.id, acc)} /> {acc}
++                                </label>
++                              ))}
++                              <label className="flex items-center gap-1.5 text-sm text-slate-600 cursor-pointer">
++                                <input type="checkbox" checked={sel.data_wiped} onChange={(e) => setRet(a.id, { data_wiped: e.target.checked })} /> Data wiped
++                              </label>
++                            </div>
++                          </Field>
++                          {sel.next_status === "in_stock" && !sel.data_wiped && (
++                            <p className="md:col-span-3 text-xs text-amber-600">Tip: wipe the device before it goes back to stock.</p>
++                          )}
++                        </div>
++                      )}
++                    </div>
++                  );
++                })}
++              </div>
++            )}
++          </div>
++        )}
++
++        <div id="ho-issue-section" className={`border-t border-slate-100 pt-4 space-y-3 ${empId ? "" : "opacity-50 pointer-events-none"}`} data-testid="ho-issue-section">
++          <div className="text-sm font-semibold text-slate-700">
++            Issue to employee <span className="text-slate-400 font-normal">{empId ? "- leave empty for a plain return" : "- select the employee first"}</span>
++          </div>
+           <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr_1fr_0.7fr_auto] gap-3 items-end">
+             <Field label="Product *">
+               <select data-testid="ho-product" value={entry.product_id} onChange={(e) => onProductPick(e.target.value)} className="hinp">
+@@ -229,7 +365,7 @@
+                 {Object.entries(catalog.reduce((g, c) => { (g[c.category_name] = g[c.category_name] || []).push(c); return g; }, {})).map(([cat, ps]) => (
+                   <optgroup key={cat} label={cat}>
+                     {ps.map((c) => {
+-                      const out = isHandover && c.in_stock <= 0;
++                      const out = c.in_stock <= 0;
+                       return (
+                         <option key={c.id} value={c.id} disabled={out} style={out ? { color: "#94a3b8" } : undefined}>
+                           {c.name} — {out ? "out of stock" : `${c.in_stock} in stock`}
+@@ -242,9 +378,7 @@
+             </Field>
+             <Field label="Category"><input data-testid="ho-category" value={prod?.category_name || ""} readOnly placeholder="Auto" className="hinp bg-slate-50 text-slate-600" /></Field>
+             <Field label="Brand">
+-              {isHandover
+-                ? <input data-testid="ho-brand" value={prod?.brand || (prod && !byQty ? "Per unit (below)" : "")} readOnly placeholder="Auto" className="hinp bg-slate-50 text-slate-600" />
+-                : <input data-testid="ho-brand" value={entry.brand} onChange={(e) => setEntry({ ...entry, brand: e.target.value })} placeholder="Auto" className="hinp" />}
++              <input data-testid="ho-brand" value={prod?.brand || (prod && !byQty ? "Per unit (below)" : "")} readOnly placeholder="Auto" className="hinp bg-slate-50 text-slate-600" />
+             </Field>
+             <Field label="Qty *"><input type="number" min="1" data-testid="ho-qty" value={entry.quantity} onChange={(e) => onQty(e.target.value)} className="hinp" /></Field>
+             <button onClick={addItem} disabled={!canAdd} data-testid="ho-add-item" className="py-2.5 px-4 rounded-lg bg-slate-800 hover:bg-slate-900 text-white font-semibold text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"><Plus size={16} /> Add</button>
+@@ -256,13 +390,13 @@
+             </div>
+           )}
+ 
+-          {isHandover && prod && byQty && !shortMsg && (
++          {prod && byQty && !shortMsg && (
+             <p className="text-xs text-slate-500" data-testid="ho-qty-note">
+               {prod.name} is a consumable with no serial numbers — it is tracked by quantity ({available} available), so no unit needs to be picked.
+             </p>
+           )}
+ 
+-          {isHandover && prod && !byQty && (
++          {prod && !byQty && (
+             <div className="rounded-lg border border-slate-200 p-3" data-testid="ho-unit-picker">
+               <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                 <div className="text-sm font-semibold text-slate-700">
+@@ -298,7 +432,7 @@
+         {lines.length > 0 && (
+           <div data-testid="ho-selected-lines">
+             <div className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+-              {isHandover ? "Assets on this slip (reserved when you save)" : "Items on this slip"}
++              Items to issue (reserved when you save)
+             </div>
+             <table className="w-full text-sm border border-slate-200 rounded-lg overflow-hidden">
+               <thead><tr className="text-left text-xs uppercase tracking-wider text-slate-500 bg-slate-50"><th className="px-4 py-2">Item</th><th className="px-4 py-2">Brand</th><th className="px-4 py-2">Tag</th><th className="px-4 py-2">Serial</th><th className="px-4 py-2">Qty</th><th className="px-4 py-2"></th></tr></thead>
+@@ -326,7 +460,7 @@
+ 
+         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+           <Field label="Remarks"><textarea data-testid="ho-remarks" value={remarks} onChange={(e) => setRemarks(e.target.value)} rows={2} className="hinp resize-none" /></Field>
+-          <Field label="Note"><textarea data-testid="ho-note" value={note} onChange={(e) => setNote(e.target.value)} rows={2} className="hinp resize-none" placeholder="e.g. Previous wireless mouse returned" /></Field>
++          <Field label="Note"><textarea data-testid="ho-note" value={note} onChange={(e) => setNote(e.target.value)} rows={2} className="hinp resize-none" placeholder="Optional note for the slip" /></Field>
+         </div>
+ 
+         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+@@ -337,8 +471,16 @@
+           </div>
+         </div>
+ 
+-        <div className="flex justify-end border-t border-slate-100 pt-4">
+-          <button onClick={submit} disabled={saving} data-testid="ho-submit" className="px-6 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-sm transition-colors disabled:opacity-60">Save Slip</button>
++        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
++          {returnIds.length > 0 ? (
++            <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer" data-testid="ho-receive-now">
++              <input type="checkbox" checked={receiveNow} onChange={(e) => setReceiveNow(e.target.checked)} />
++              The returned device(s) are with IT now - mark as received
++            </label>
++          ) : <span />}
++          <button onClick={submit} disabled={saving || !hasAnything} data-testid="ho-submit" className="px-6 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-sm transition-colors disabled:opacity-60">
++            {saving ? "Saving…" : hasAnything ? `Save ${meta.sub} Slip` : "Save Slip"}
++          </button>
+         </div>
+       </div>
+       <style>{`.hinp{width:100%;padding:0.55rem 0.75rem;border:1px solid #cbd5e1;border-radius:0.5rem;font-size:0.875rem;outline:none}.hinp:focus{border-color:#d97706}`}</style>
+--- a/src/pages/HandoverRecords.jsx
++++ b/src/pages/HandoverRecords.jsx
+@@ -1,31 +1,86 @@
+ import { useEffect, useState } from "react";
+ import { toast } from "sonner";
+-import { Eye, Handshake, ArrowLeftRight, FileText, CheckCircle2 } from "lucide-react";
++import { Eye, Handshake, ArrowLeftRight, RefreshCw, FileText, CheckCircle2, PackageCheck } from "lucide-react";
+ import api, { API, formatApiErrorDetail, withAuthParam } from "@/lib/apiClient";
+ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+ 
++const TYPE_META = {
++  handover: { label: "Handover", cls: "bg-emerald-100 text-emerald-700", Icon: Handshake },
++  takeover: { label: "Takeover", cls: "bg-sky-100 text-sky-700", Icon: ArrowLeftRight },
++  swap: { label: "Swap", cls: "bg-amber-100 text-amber-700", Icon: RefreshCw },
++};
++const CONDITIONS = [["good", "Good"], ["damaged", "Damaged"], ["missing_parts", "Missing parts"]];
++const DESTINATIONS = [["in_stock", "Back to stock"], ["under_repair", "Under repair"], ["scrapped", "Scrap"]];
++const DEST_LABEL = Object.fromEntries(DESTINATIONS);
++const COND_LABEL = Object.fromEntries(CONDITIONS);
++
++// One place that decides what the Status column says, for every slip type.
++// Old takeover slips (created before return tracking) have no return_items and stay "Recorded".
++function statusOf(h) {
++  const hasReturns = (h.return_items || []).length > 0;
++  if (h.type === "takeover") {
++    if (!hasReturns) return { label: "Recorded", cls: "bg-slate-100 text-slate-500" };
++    return h.status === "completed"
++      ? { label: "Completed ✓ Received by IT", cls: "bg-emerald-100 text-emerald-700" }
++      : { label: "Awaiting IT receipt", cls: "bg-amber-100 text-amber-700" };
++  }
++  if (h.status === "confirmed") {
++    return { label: h.type === "swap" ? "Completed ✓ Confirmed" : "Delivered ✓ Confirmed", cls: "bg-emerald-100 text-emerald-700" };
++  }
++  if (h.status === "delivered") return { label: "Awaiting Confirmation", cls: "bg-sky-100 text-sky-700" };
++  return { label: "Prepared", cls: "bg-amber-100 text-amber-700" };
++}
++
+ export default function HandoverRecords() {
+   const [rows, setRows] = useState([]);
+   const [detail, setDetail] = useState(null);
++  const [recv, setRecv] = useState(null);      // slip being received: {slip, lines: {asset_id: {...}}}
++  const [busy, setBusy] = useState(false);
+ 
+   const load = () => { api.get("/handovers").then(({ data }) => setRows(data)).catch(() => {}); };
+   useEffect(load, []);
+ 
+-  const markDelivered = async (hid) => {
++  const markDelivered = async (h) => {
+     try {
+-      await api.post(`/handovers/${hid}/deliver`);
+-      toast.success("Marked delivered — waiting for the employee to confirm receipt on their bell notification.");
++      await api.post(`/handovers/${h.id}/deliver`);
++      toast.success(h.type === "swap"
++        ? "Done - old device received, new device delivered. Waiting for the employee to confirm receipt."
++        : "Marked delivered — waiting for the employee to confirm receipt on their bell notification.");
+       load();
+     } catch (e) {
+       toast.error(formatApiErrorDetail(e.response?.data?.detail));
++      load();
+     }
+   };
+ 
++  const openReceive = (h) => setRecv({
++    slip: h,
++    lines: Object.fromEntries((h.return_items || []).map((r) => [r.asset_id, {
++      condition: r.condition || "good", next_status: r.next_status || "in_stock",
++      data_wiped: !!r.data_wiped, accessories: r.accessories || [],
++    }])),
++  });
++  const setLine = (id, patch) => setRecv((r) => ({ ...r, lines: { ...r.lines, [id]: { ...r.lines[id], ...patch } } }));
++
++  const confirmReceive = async () => {
++    setBusy(true);
++    try {
++      const lines = Object.entries(recv.lines).map(([asset_id, v]) => ({ asset_id, ...v }));
++      await api.post(`/handovers/${recv.slip.id}/receive-return`, { lines });
++      toast.success("Received - asset status updated.");
++      setRecv(null);
++      load();
++    } catch (e) {
++      toast.error(formatApiErrorDetail(e.response?.data?.detail));
++      load();
++    } finally { setBusy(false); }
++  };
++
+   return (
+     <div className="space-y-6" data-testid="handover-records-page">
+       <div>
+         <h2 className="font-head text-2xl font-bold text-slate-900">Handover Records</h2>
+-        <p className="text-slate-500 text-sm mt-1">All hand over / take over slips.</p>
++        <p className="text-slate-500 text-sm mt-1">All hand over / take over / replacement slips.</p>
+       </div>
+ 
+       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-x-auto">
+@@ -35,46 +90,53 @@
+           </tr></thead>
+           <tbody>
+             {rows.length === 0 && <tr><td colSpan={8} className="px-6 py-10 text-center text-slate-400">No handover records yet.</td></tr>}
+-            {rows.map((h) => (
+-              <tr key={h.id} className="border-b border-slate-50 hover:bg-slate-50/60 transition-colors" data-testid={`ho-row-${h.slip_no}`}>
+-                <td className="px-6 py-3 font-mono text-slate-800">{h.slip_no}</td>
+-                <td className="px-6 py-3">
+-                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${h.type === "handover" ? "bg-amber-100 text-amber-700" : "bg-sky-100 text-sky-700"}`}>
+-                    {h.type === "handover" ? <Handshake size={12} /> : <ArrowLeftRight size={12} />}{h.type}
+-                  </span>
+-                </td>
+-                <td className="px-6 py-3 text-slate-700">{h.employee_name}</td>
+-                <td className="px-6 py-3 text-amber-700">{h.department_name || "—"}</td>
+-                <td className="px-6 py-3 text-slate-600">{h.items.length}</td>
+-                <td className="px-6 py-3">
+-                  {h.type === "handover" && (
+-                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${
+-                      h.status === "confirmed" ? "bg-emerald-100 text-emerald-700"
+-                        : h.status === "delivered" ? "bg-sky-100 text-sky-700"
+-                        : "bg-amber-100 text-amber-700"}`}>
+-                      {h.status === "confirmed" ? "Delivered ✓ Confirmed"
+-                        : h.status === "delivered" ? "Awaiting Confirmation"
+-                        : "Prepared"}
++            {rows.map((h) => {
++              const m = TYPE_META[h.type] || TYPE_META.takeover;
++              const st = statusOf(h);
++              const outN = (h.items || []).length;
++              const inN = (h.return_items || []).length;
++              const needsReceipt = inN > 0 && !h.return_received;
++              return (
++                <tr key={h.id} className="border-b border-slate-50 hover:bg-slate-50/60 transition-colors" data-testid={`ho-row-${h.slip_no}`}>
++                  <td className="px-6 py-3 font-mono text-slate-800">{h.slip_no}</td>
++                  <td className="px-6 py-3">
++                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${m.cls}`}>
++                      <m.Icon size={12} />{m.label}
+                     </span>
+-                  )}
+-                </td>
+-                <td className="px-6 py-3 text-slate-500">{(h.handover_date || "").slice(0, 10)}</td>
+-                <td className="px-6 py-3 text-right">
+-                  <div className="flex items-center justify-end gap-2">
+-                    {h.type === "handover" && h.status === "prepared" && (
+-                      <button onClick={() => markDelivered(h.id)} data-testid={`ho-deliver-${h.slip_no}`} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 flex items-center gap-1.5 transition-colors"><CheckCircle2 size={14} /> Handover Done</button>
+-                    )}
+-                    <button onClick={() => window.open(withAuthParam(`${API}/handovers/${h.id}/pdf`), "_blank")} data-testid={`ho-pdf-${h.slip_no}`} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors"><FileText size={14} /> PDF</button>
+-                    <button onClick={() => setDetail(h)} data-testid={`ho-view-${h.slip_no}`} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors"><Eye size={14} /> View</button>
+-                  </div>
+-                </td>
+-              </tr>
+-            ))}
++                  </td>
++                  <td className="px-6 py-3 text-slate-700">{h.employee_name}</td>
++                  <td className="px-6 py-3 text-amber-700">{h.department_name || "—"}</td>
++                  <td className="px-6 py-3 text-slate-600">
++                    {h.type === "swap" ? `${outN} out / ${inN} in` : h.type === "takeover" && inN > 0 ? `${inN} in` : outN}
++                  </td>
++                  <td className="px-6 py-3">
++                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${st.cls}`}>{st.label}</span>
++                  </td>
++                  <td className="px-6 py-3 text-slate-500">{(h.handover_date || "").slice(0, 10)}</td>
++                  <td className="px-6 py-3 text-right">
++                    <div className="flex items-center justify-end gap-2">
++                      {needsReceipt && (
++                        <button onClick={() => openReceive(h)} data-testid={`ho-receive-${h.slip_no}`}
++                          title={h.type === "swap" ? "Receive the old device now (Handover Done also does this)" : "Confirm IT has the device"}
++                          className="px-3 py-1.5 rounded-lg bg-sky-600 text-white text-xs font-semibold hover:bg-sky-700 flex items-center gap-1.5 transition-colors"><PackageCheck size={14} /> Received by IT</button>
++                      )}
++                      {(h.type === "handover" || h.type === "swap") && h.status === "prepared" && (
++                        <button onClick={() => markDelivered(h)} data-testid={`ho-deliver-${h.slip_no}`}
++                          title={h.type === "swap" ? "Receives the old device and delivers the new one" : undefined}
++                          className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 flex items-center gap-1.5 transition-colors"><CheckCircle2 size={14} /> Handover Done</button>
++                      )}
++                      <button onClick={() => window.open(withAuthParam(`${API}/handovers/${h.id}/pdf`), "_blank")} data-testid={`ho-pdf-${h.slip_no}`} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors"><FileText size={14} /> PDF</button>
++                      <button onClick={() => setDetail(h)} data-testid={`ho-view-${h.slip_no}`} className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5 transition-colors"><Eye size={14} /> View</button>
++                    </div>
++                  </td>
++                </tr>
++              );
++            })}
+           </tbody>
+         </table>
+       </div>
+ 
+-
++      {/* Slip details */}
+       <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
+         <DialogContent className="max-w-lg" data-testid="ho-detail-dialog">
+           {detail && (
+@@ -85,17 +147,39 @@
+                   <div><div className="text-xs uppercase text-slate-400">Employee</div><div className="font-medium">{detail.employee_name}</div></div>
+                   <div><div className="text-xs uppercase text-slate-400">Department</div><div className="font-medium">{detail.department_name || "—"}</div></div>
+                 </div>
+-                <div>
+-                  <div className="text-xs uppercase text-slate-400 mb-2">Items</div>
+-                  <div className="border border-slate-200 rounded-lg divide-y divide-slate-100">
+-                    {detail.items.map((it, i) => (
+-                      <div key={i} className="flex items-center justify-between px-4 py-2">
+-                        <span>{it.item} {it.brand && <span className="text-slate-400">· {it.brand}</span>}</span>
+-                        <span className="font-mono">×{it.quantity}</span>
+-                      </div>
+-                    ))}
++                {(detail.return_items || []).length > 0 && (
++                  <div>
++                    <div className="text-xs uppercase text-slate-400 mb-2">Returned by employee {detail.return_received ? "· received" : "· awaiting IT"}</div>
++                    <div className="border border-slate-200 rounded-lg divide-y divide-slate-100">
++                      {detail.return_items.map((it, i) => (
++                        <div key={i} className="px-4 py-2">
++                          <div className="flex items-center justify-between">
++                            <span>{it.item} {it.brand && <span className="text-slate-400">· {it.brand}</span>}</span>
++                            <span className="font-mono text-slate-500 text-xs">{it.tag_id || it.serial_no || "—"}</span>
++                          </div>
++                          <div className="text-xs text-slate-500 mt-0.5">
++                            {COND_LABEL[it.condition] || "—"} → {DEST_LABEL[it.next_status] || "—"}
++                            {(it.accessories || []).length > 0 && ` · with ${it.accessories.join(", ")}`}
++                            {it.data_wiped && " · data wiped"}
++                          </div>
++                        </div>
++                      ))}
++                    </div>
+                   </div>
+-                </div>
++                )}
++                {(detail.items || []).length > 0 && (
++                  <div>
++                    <div className="text-xs uppercase text-slate-400 mb-2">{detail.type === "swap" ? "Issued to employee" : "Items"}</div>
++                    <div className="border border-slate-200 rounded-lg divide-y divide-slate-100">
++                      {detail.items.map((it, i) => (
++                        <div key={i} className="flex items-center justify-between px-4 py-2">
++                          <span>{it.item} {it.brand && <span className="text-slate-400">· {it.brand}</span>}</span>
++                          <span className="font-mono">×{it.quantity}</span>
++                        </div>
++                      ))}
++                    </div>
++                  </div>
++                )}
+                 {detail.note && <div><div className="text-xs uppercase text-slate-400">Note</div><div>{detail.note}</div></div>}
+                 <div className="grid grid-cols-2 gap-4">
+                   <SigView label="Prepared By" src={detail.prepared_by_sign} />
+@@ -106,6 +190,52 @@
+           )}
+         </DialogContent>
+       </Dialog>
++
++      {/* Received by IT: confirm / correct condition and destination while inspecting the device */}
++      <Dialog open={!!recv} onOpenChange={(o) => !o && !busy && setRecv(null)}>
++        <DialogContent className="max-w-xl" data-testid="ho-receive-dialog">
++          {recv && (
++            <>
++              <DialogHeader><DialogTitle className="font-mono">Receive returned assets · {recv.slip.slip_no}</DialogTitle></DialogHeader>
++              <p className="text-sm text-slate-500">Check each device and correct anything that differs from what was entered on the slip.</p>
++              <div className="space-y-3 max-h-[55vh] overflow-y-auto">
++                {recv.slip.return_items.map((r) => {
++                  const v = recv.lines[r.asset_id];
++                  return (
++                    <div key={r.asset_id} className="border border-slate-200 rounded-lg p-3 space-y-2" data-testid={`ho-receive-line-${r.asset_id}`}>
++                      <div className="flex items-center justify-between text-sm">
++                        <span className="font-medium">{r.item}</span>
++                        <span className="font-mono text-xs text-slate-500">{r.tag_id || r.serial_no || "—"}</span>
++                      </div>
++                      <div className="grid grid-cols-2 gap-3">
++                        <label className="text-xs font-semibold uppercase tracking-wider text-slate-500">Condition
++                          <select value={v.condition} className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-normal normal-case tracking-normal text-slate-800"
++                            onChange={(e) => setLine(r.asset_id, { condition: e.target.value, next_status: e.target.value === "good" ? "in_stock" : (v.next_status === "in_stock" ? "under_repair" : v.next_status) })}>
++                            {CONDITIONS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
++                          </select>
++                        </label>
++                        <label className="text-xs font-semibold uppercase tracking-wider text-slate-500">Then
++                          <select value={v.next_status} className="mt-1 w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-normal normal-case tracking-normal text-slate-800"
++                            onChange={(e) => setLine(r.asset_id, { next_status: e.target.value })}>
++                            {DESTINATIONS.filter(([k]) => k !== "in_stock" || v.condition === "good").map(([k, l]) => <option key={k} value={k}>{l}</option>)}
++                          </select>
++                        </label>
++                      </div>
++                      <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
++                        <input type="checkbox" checked={v.data_wiped} onChange={(e) => setLine(r.asset_id, { data_wiped: e.target.checked })} /> Data wiped
++                      </label>
++                    </div>
++                  );
++                })}
++              </div>
++              <div className="flex justify-end gap-2 pt-2">
++                <button onClick={() => setRecv(null)} disabled={busy} className="px-4 py-2 rounded-lg border border-slate-300 text-slate-600 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50">Cancel</button>
++                <button onClick={confirmReceive} disabled={busy} data-testid="ho-receive-confirm" className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold disabled:opacity-60">{busy ? "Saving…" : "Confirm received"}</button>
++              </div>
++            </>
++          )}
++        </DialogContent>
++      </Dialog>
+     </div>
+   );
+ }
+@@ -118,4 +248,4 @@
+         : <div className="h-20 border border-dashed border-slate-200 rounded-lg flex items-center justify-center text-xs text-slate-300">No signature</div>}
+     </div>
+   );
+-}
+\ No newline at end of file
++}
+--- a/src/pages/AssignedAssets.jsx
++++ b/src/pages/AssignedAssets.jsx
+@@ -142,7 +142,7 @@
+   const employees = useMemo(() => {
+     const map = {};
+     assets
+-      .filter((a) => a.status === "assigned" && a.assigned_to)
++      .filter((a) => (a.status === "assigned" || a.status === "return_pending") && a.assigned_to)
+       .forEach((a) => {
+         const key = a.assigned_to;
+         if (!map[key]) {
+--- a/src/pages/StockList.jsx
++++ b/src/pages/StockList.jsx
+@@ -7,6 +7,9 @@
+   pending_receipt: "bg-sky-100 text-sky-700",
+   assigned: "bg-amber-100 text-amber-700",
+   returned: "bg-slate-100 text-slate-600",
++  return_pending: "bg-sky-100 text-sky-700",
++  under_repair: "bg-orange-100 text-orange-700",
++  scrapped: "bg-red-100 text-red-700",
+ };
+ 
+ // Main dashboard view: aggregated available stock per item type only.
+@@ -111,7 +114,7 @@
+                     <tr key={a.id} className="border-b border-slate-50" data-testid={`stock-detail-row-${a.id}`}>
+                       <td className="px-6 py-2 font-mono text-slate-600">{a.serial_no || "—"}</td>
+                       <td className="px-6 py-2 font-mono text-amber-700">{a.tag_id || "—"}</td>
+-                      <td className="px-6 py-2"><span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_CLS[a.status] || "bg-slate-100 text-slate-600"}`}>{a.status.replace("_", " ")}</span></td>
++                      <td className="px-6 py-2"><span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_CLS[a.status] || "bg-slate-100 text-slate-600"}`}>{a.status.replace(/_/g, " ")}</span></td>
+                       <td className="px-6 py-2 text-slate-700">{a.assigned_to || "—"}</td>
+                     </tr>
+                   ))}

@@ -4,6 +4,9 @@
 @tailwind components;
 @tailwind utilities;
 
+html { font-size: 17px; }
+@media (min-width: 1280px) { html { font-size: 18px; } }
+
 body {
     margin: 0;
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -61,3 +64,60 @@ h1, h2, h3, h4, .font-head {
 @layer base {
     [data-debug-wrapper="true"] { display: contents !important; }
 }
+
+/* ---------- Corporate data tables (all pages) ---------- */
+main table { border-collapse: separate; border-spacing: 0; width: 100%; font-variant-numeric: tabular-nums; }
+main table thead th {
+    padding: 10px 16px !important;
+    font-size: .8rem !important;
+    font-weight: 600 !important;
+    letter-spacing: .06em;
+    color: #475569 !important;
+    background: #F1F5F9 !important;
+    border-bottom: 1px solid #E2E8F0 !important;
+    white-space: nowrap;
+}
+main table tbody td {
+    padding: 11px 16px !important;
+    border-bottom: 1px solid #EEF2F6 !important;
+    vertical-align: middle;
+}
+main table tbody tr:last-child > td { border-bottom: 0 !important; }
+main table tbody tr:nth-child(even) { background: #FAFBFD; }      /* zebra: helps the eye follow a row */
+main table tbody tr:hover { background: #F1F5F9; }
+main table th:last-child, main table td:last-child { white-space: nowrap; }  /* action buttons never wrap */
+.table-card { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px; box-shadow: 0 1px 2px rgba(15,23,42,.04); overflow: hidden; }
+.table-card > .table-scroll { overflow-x: auto; }
+
+/* ---------- Larger, easier-to-read type ----------
+   The whole UI is rem-based, so the html font-size above scales text, spacing and controls
+   together. These lift the smallest sizes, which were the hardest to read. */
+.text-xs { font-size: 0.8125rem !important; line-height: 1.2rem !important; }
+.text-\[10px\] { font-size: 0.75rem !important; }
+.text-\[11px\] { font-size: 0.8rem !important; }
+input, select, textarea, button { font-size: inherit; }
+
+/* ---------- Enterprise canvas & card surfaces ---------- */
+:root {
+    --canvas: #F3F5F9;
+    --canvas-top: #E7ECF5;
+    --card-border: #E2E8F0;
+    --shadow-card: 0 1px 2px rgba(16, 24, 40, .04), 0 2px 6px rgba(16, 24, 40, .05);
+    --shadow-card-hover: 0 4px 12px rgba(16, 24, 40, .08), 0 2px 4px rgba(16, 24, 40, .05);
+}
+/* Soft cool-grey page background with a gentle top wash — white cards lift off it cleanly. */
+.app-canvas {
+    background-color: var(--canvas);
+    background-image:
+        linear-gradient(180deg, var(--canvas-top) 0, rgba(243, 245, 249, 0) 340px),
+        radial-gradient(rgba(100, 116, 139, .09) 1px, transparent 1px);
+    background-size: 100% 100%, 22px 22px;
+    background-repeat: no-repeat, repeat;
+    background-attachment: scroll, scroll;
+}
+/* One consistent card look across every page (any white rounded bordered box in the content area). */
+main .bg-white.rounded-xl.border {
+    border-color: var(--card-border);
+    box-shadow: var(--shadow-card);
+}
+main a.bg-white.rounded-xl.border:hover { box-shadow: var(--shadow-card-hover); }

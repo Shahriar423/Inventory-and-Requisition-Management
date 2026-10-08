@@ -1,0 +1,608 @@
+--- a/server.py
++++ b/server.py
+@@ -11,7 +11,7 @@
+ from motor.motor_asyncio import AsyncIOMotorClient
+ from pymongo import ReturnDocument
+ from pydantic import BaseModel, Field, EmailStr
+-from typing import List, Optional, Literal
++from typing import List, Optional, Literal, Dict
+ from datetime import datetime, timezone, timedelta
+ from bson import ObjectId
+ import logging
+@@ -2137,7 +2137,7 @@
+ 
+     if vis_scope == "global":
+         assets_total = await db.assets.count_documents({})
+-        assets_assigned = await db.assets.count_documents({"status": "assigned"})
++        assets_assigned = await db.assets.count_documents({"status": {"$in": ["assigned", "return_pending"]}})
+     elif vis_scope == "department":
+         dept_users = await db.users.find({"department_id": user.get("department_id")}).to_list(500)
+         names = [u["name"] for u in dept_users]
+@@ -2690,7 +2690,7 @@
+     # Employee details for the Assigned Assets inventory view: department + email of the
+     # person holding the asset. Department falls back to the employee's own user record
+     # when the handover slip didn't carry one.
+-    if a.get("status") == "assigned" and a.get("assigned_to"):
++    if a.get("status") in ("assigned", "return_pending") and a.get("assigned_to"):
+         u = None
+         uid = a.get("assigned_to_user_id")
+         if uid and ObjectId.is_valid(uid):
+@@ -2734,12 +2734,15 @@
+     return out
+ 
+ @api_router.get("/assets")
+-async def list_assets(status: Optional[str] = None, assigned_to: Optional[str] = None, user: dict = Depends(get_current_user)):
++async def list_assets(status: Optional[str] = None, assigned_to: Optional[str] = None,
++                      assigned_to_user_id: Optional[str] = None, user: dict = Depends(get_current_user)):
+     q = {}
+     if status:
+         q["status"] = status
+     if assigned_to:
+         q["assigned_to"] = assigned_to
++    if assigned_to_user_id:
++        q["assigned_to_user_id"] = assigned_to_user_id
+     if user["role"] == "executive" and status != "in_stock":
+         # Plain employees only see their own assigned assets. in_stock items carry no
+         # personal data (assigned_to is empty), so they're exempt — needed for the Stock
+@@ -2822,6 +2825,7 @@
+         }
+         res = await db.assets.insert_one(doc)
+         doc["_id"] = res.inserted_id
++        await _log_asset_event(doc, "issued", user["name"], emp=emp, source="existing_entry")
+         created.append(await _enrich_asset(doc))
+     return {"ok": True, "employee": emp["name"], "created": len(created), "assets": created}
+ 
+@@ -2933,12 +2937,26 @@
+     remarks: Optional[str] = None
+     asset_id: Optional[str] = None
+ 
++class ReturnItemIn(BaseModel):
++    """One asset the employee is handing back (takeover / swap). Always a real, tagged asset:
++    the unit must currently be assigned to that employee."""
++    asset_id: str
++    condition: Literal["good", "damaged", "missing_parts"] = "good"
++    next_status: Literal["in_stock", "under_repair", "scrapped"] = "in_stock"
++    accessories: List[str] = []        # e.g. ["Charger", "Bag", "Mouse"]
++    data_wiped: bool = False
++    remarks: Optional[str] = None
++
+ class HandoverIn(BaseModel):
+-    type: Literal["handover", "takeover"]
++    # `type` is DERIVED by the server from the lines (items only -> handover, return_items only
++    # -> takeover, both -> swap). It is still accepted so old clients do not break, but ignored.
++    type: Optional[Literal["handover", "takeover", "swap"]] = None
+     employee_name: str
+     employee_user_id: Optional[str] = None   # picked from the employee list (preferred)
+     department_id: Optional[str] = None
+-    items: List[HandoverItemIn]
++    items: List[HandoverItemIn] = []         # issued to the employee  (OUT)
++    return_items: List[ReturnItemIn] = []    # received back from them (IN)
++    receive_now: bool = False                # the returned devices are physically with IT right now
+     remarks: Optional[str] = None
+     note: Optional[str] = None
+     handover_date: Optional[str] = None
+@@ -2948,6 +2966,159 @@
+     # _find_requisition_for_handover for the auto-detect fallback when this is omitted).
+     requisition_id: Optional[str] = None
+ 
++# ---- Asset return lifecycle -------------------------------------------------------------
++#   in_stock -> (pending_receipt) -> assigned -> return_pending -> in_stock | under_repair | scrapped
++ASSET_HELD_STATUSES = ["assigned", "return_pending"]
++CONDITION_LABELS = {"good": "Good", "damaged": "Damaged", "missing_parts": "Missing parts"}
++
++async def _can_manage_handovers(user: dict) -> bool:
++    """Same people who can open the Handover module: Super Admin, the IT head, or the PR raiser."""
++    if user.get("role") == "super_admin" or has_pr_raise_flag(user):
++        return True
++    it_dept = await find_dept_by_name("IT")
++    return bool(it_dept and user.get("role") == "dept_head"
++                and user.get("department_id") == str(it_dept["_id"]))
++
++def _held_filter(emp: dict, statuses: Optional[List[str]] = None) -> dict:
++    """Mongo filter for 'assets this employee holds'. Matches on the user id; assets created
++    before assigned_to_user_id was stored fall back to an exact name match, restricted to the
++    employee's department so a same-named person elsewhere is never picked up."""
++    uid = str(emp["_id"])
++    legacy: dict = {
++        "assigned_to_user_id": {"$in": [None, ""]},
++        "assigned_to": {"$regex": f"^{re.escape((emp.get('name') or '').strip())}$", "$options": "i"},
++    }
++    if emp.get("department_id"):
++        legacy["assigned_department_id"] = {"$in": [None, emp["department_id"]]}
++    return {"status": {"$in": statuses or ASSET_HELD_STATUSES},
++            "$or": [{"assigned_to_user_id": uid}, legacy]}
++
++async def _log_asset_event(asset: dict, event: str, by: str, emp: Optional[dict] = None,
++                           slip_no: Optional[str] = None, handover_id: Optional[str] = None, **extra):
++    """Append-only life history of an asset: who got it, who returned it, in what condition."""
++    await db.asset_history.insert_one({
++        "asset_id": str(asset["_id"]), "asset_name": asset.get("name"),
++        "tag_id": asset.get("tag_id"), "serial_no": asset.get("serial_no"),
++        "event": event, "employee_user_id": str(emp["_id"]) if emp else extra.pop("employee_user_id", None),
++        "employee_name": emp.get("name") if emp else extra.pop("employee_name", None),
++        "slip_no": slip_no, "handover_id": handover_id, "by": by, "at": now_iso(), **extra})
++
++async def prepare_return_items(return_items: List[dict], emp: dict) -> List[dict]:
++    """Every returned line must be a real asset that is assigned to THIS employee right now.
++    Nothing is written here - this only validates and builds the slip's return lines."""
++    if not return_items:
++        return []
++    out: List[dict] = []
++    seen: set = set()
++    for r in return_items:
++        aid = r.get("asset_id")
++        if not aid or not ObjectId.is_valid(aid):
++            raise HTTPException(status_code=400, detail="An invalid asset was selected for return. Pick it again.")
++        if aid in seen:
++            raise HTTPException(status_code=400, detail="The same asset is listed for return more than once.")
++        seen.add(aid)
++        a = await db.assets.find_one({"_id": ObjectId(aid)})
++        if not a:
++            raise HTTPException(status_code=400, detail="A selected asset no longer exists. Pick it again.")
++        label = f"{a.get('name')} ({a.get('tag_id') or a.get('serial_no') or 'no tag'})"
++        if a.get("status") == "return_pending":
++            raise HTTPException(status_code=400, detail=f"{label} already has a return in progress (slip {a.get('pending_return_slip_no') or '-'}).")
++        held = await db.assets.find_one({"_id": ObjectId(aid), **_held_filter(emp, ["assigned"])})
++        if not held:
++            raise HTTPException(status_code=400, detail=f"{label} is not assigned to {emp['name']}, so it cannot be taken over.")
++        if r.get("condition", "good") != "good" and r.get("next_status", "in_stock") == "in_stock":
++            raise HTTPException(status_code=400, detail=(
++                f"{label} is marked {CONDITION_LABELS.get(r.get('condition'))}; send it to Under Repair or Scrapped, not back to stock."))
++        out.append({
++            "asset_id": aid, "item": a.get("name"), "brand": a.get("brand"),
++            "tag_id": a.get("tag_id"), "serial_no": a.get("serial_no"), "quantity": 1,
++            "condition": r.get("condition", "good"), "next_status": r.get("next_status", "in_stock"),
++            "accessories": r.get("accessories") or [], "data_wiped": bool(r.get("data_wiped")),
++            "remarks": r.get("remarks"), "received": False,
++        })
++    return out
++
++async def _release_slip_locks(hid: str):
++    """Undo everything a not-yet-completed slip locked: reserved stock goes back to in_stock and
++    assets waiting to be returned go back to 'assigned'. Used on failed saves and slip deletion."""
++    await db.assets.update_many(
++        {"pending_handover_id": hid, "status": "in_stock"},
++        {"$set": {"pending_receipt": False, "pending_handover_id": None,
++                  "assigned_to_tentative": None, "assigned_department_id": None}})
++    await db.assets.update_many(
++        {"pending_return_handover_id": hid, "status": "return_pending"},
++        {"$set": {"status": "assigned", "pending_return_handover_id": None, "pending_return_slip_no": None}})
++
++async def _apply_returns(h: dict, user: dict, overrides: Optional[Dict[str, dict]] = None) -> int:
++    """IT physically received the returned device(s): move each asset to its destination status,
++    clear the assignment, write history and - if it is good to re-issue - restock waiting
++    requisitions. Idempotent: does nothing if the slip's returns were already received.
++    Raises 409 (and changes nothing further) if an asset is no longer awaiting return."""
++    lines = h.get("return_items") or []
++    if not lines or h.get("return_received"):
++        return 0
++    hid = str(h["_id"])
++    overrides = overrides or {}
++
++    # Validate every line first so a bad row never leaves a half-received slip.
++    for ln in lines:
++        ov = overrides.get(ln["asset_id"], {})
++        cond = ov.get("condition") or ln.get("condition", "good")
++        dest = ov.get("next_status") or ln.get("next_status", "in_stock")
++        if cond != "good" and dest == "in_stock":
++            raise HTTPException(status_code=400, detail=(
++                f"{ln.get('item')} is {CONDITION_LABELS.get(cond, cond)} - choose Under Repair or Scrapped."))
++        a = await db.assets.find_one({"_id": ObjectId(ln["asset_id"])})
++        if not a or a.get("status") != "return_pending" or a.get("pending_return_handover_id") != hid:
++            raise HTTPException(status_code=409, detail=(
++                f"{ln.get('item')} ({ln.get('tag_id') or ln.get('serial_no') or 'no tag'}) is no longer waiting to be returned on this slip."))
++
++    emp = None
++    if h.get("employee_user_id") and ObjectId.is_valid(h["employee_user_id"]):
++        emp = await db.users.find_one({"_id": ObjectId(h["employee_user_id"])})
++    restock = False
++    for ln in lines:
++        ov = overrides.get(ln["asset_id"], {})
++        ln["condition"] = ov.get("condition") or ln.get("condition", "good")
++        ln["next_status"] = ov.get("next_status") or ln.get("next_status", "in_stock")
++        if ov.get("accessories") is not None:
++            ln["accessories"] = ov["accessories"]
++        if ov.get("data_wiped") is not None:
++            ln["data_wiped"] = bool(ov["data_wiped"])
++        if ov.get("remarks"):
++            ln["remarks"] = ov["remarks"]
++        res = await db.assets.update_one(
++            {"_id": ObjectId(ln["asset_id"]), "status": "return_pending", "pending_return_handover_id": hid},
++            {"$set": {
++                "status": ln["next_status"], "condition": ln["condition"],
++                "assigned_to": None, "assigned_to_user_id": None, "assigned_department_id": None,
++                "assigned_at": None, "assigned_handover_id": None, "assigned_slip_no": None,
++                "receipt_confirmed": False, "pending_receipt": False, "pending_handover_id": None,
++                "pending_return_handover_id": None, "pending_return_slip_no": None,
++                "last_returned_at": now_iso(), "last_returned_by": h.get("employee_name"),
++                "data_wiped": ln["data_wiped"]}})
++        if res.modified_count == 0:
++            raise HTTPException(status_code=409, detail="An asset changed while receiving. Reload and try again.")
++        ln["received"] = True
++        asset_doc = await db.assets.find_one({"_id": ObjectId(ln["asset_id"])})
++        await _log_asset_event(
++            asset_doc, "returned", user["name"], emp=emp, slip_no=h.get("slip_no"), handover_id=hid,
++            employee_user_id=h.get("employee_user_id"), employee_name=h.get("employee_name"),
++            condition=ln["condition"], next_status=ln["next_status"],
++            accessories=ln["accessories"], data_wiped=ln["data_wiped"], remarks=ln.get("remarks"))
++        if ln["next_status"] == "in_stock":
++            restock = True
++
++    upd = {"return_items": lines, "return_received": True,
++           "return_received_at": now_iso(), "return_received_by": user["name"]}
++    if h.get("type") == "takeover":      # a pure takeover is finished once IT has the device
++        upd["status"] = "completed"
++    await db.handovers.update_one({"_id": h["_id"]}, {"$set": upd})
++    h.update(upd)
++    if restock:
++        await process_waiting_stock_requisitions()    # a returned laptop can fulfil a waiting requisition
++    return len(lines)
++
+ async def _enrich_handover(h: dict) -> dict:
+     h = strip_id(h)
+     if h.get("department_id") and ObjectId.is_valid(h["department_id"]):
+@@ -3006,7 +3177,8 @@
+         aid = it.get("asset_id")
+         if aid:
+             a = await db.assets.find_one({"_id": ObjectId(aid)})
+-            out.append({**it, "item": a["name"], "brand": it.get("brand") or a.get("brand"), "quantity": 1})
++            out.append({**it, "item": a["name"], "brand": it.get("brand") or a.get("brand"), "quantity": 1,
++                        "tag_id": a.get("tag_id"), "serial_no": a.get("serial_no")})
+             continue
+         name = (it.get("item") or "").strip()
+         if not name:
+@@ -3026,42 +3198,62 @@
+         for c in cands:
+             picked.add(str(c["_id"]))
+             out.append({**it, "item": c["name"], "quantity": 1, "asset_id": str(c["_id"]),
+-                        "brand": it.get("brand") or c.get("brand")})
++                        "brand": it.get("brand") or c.get("brand"),
++                        "tag_id": c.get("tag_id"), "serial_no": c.get("serial_no")})
+         if len(cands) < qty:   # consumable: remainder handed over as a counted line
+             out.append({**it, "item": prod["name"], "quantity": qty - len(cands), "asset_id": None})
+     return out
+ 
+ @api_router.post("/handovers")
+ async def create_handover(payload: HandoverIn, user: dict = Depends(get_current_user)):
+-    """Creates the handover slip in 'prepared' state and reserves the chosen assets
+-    (pending_receipt) so they can't be double-booked. The bell notification to the
+-    requester is intentionally NOT created here — IT still needs to print the slip and
+-    physically deliver the item first. See POST /handovers/{hid}/deliver ("Handover Done").
+-
+-    If this handover is actually fulfilling an open requisition (goods received via GRN,
+-    status == stock_received_in_it), link it — explicitly via payload.requisition_id, or
+-    auto-detected by requester name + item match when that's not provided — and advance the
+-    requisition the same way /requisitions/{id}/issue-stock would. Otherwise the requisition
+-    is left permanently stuck at "Stock Received in IT" even after this handover is
+-    delivered and confirmed, since nothing else would ever tell it to move on."""
+-    slip_no = await _next_no("HO" if payload.type == "handover" else "TO", "handover")
+-    items = [it.model_dump() for it in payload.items]
++    """Creates ONE slip that can carry issued lines (items), returned lines (return_items), or both.
++    The type is derived, never chosen:
++        items only        -> handover  (HO-)   new allocation
++        return_items only -> takeover  (TO-)   resignation / plain return
++        both              -> swap      (SW-)   replacement: old device in, new device out
++
++    Issued assets are reserved (pending_receipt) and returned assets are locked
++    (status 'return_pending') so neither can be double-booked. Everything is validated BEFORE the
++    slip is written, and if a lock fails midway the whole slip is undone.
++
++    The bell notification to the requester is intentionally NOT created here - IT still needs to
++    print the slip and physically deliver the item first (POST /handovers/{hid}/deliver).
++    Returned devices are received via POST /handovers/{hid}/receive-return, or immediately when
++    receive_now is true.
++
++    If the issued part fulfils an open requisition (status == stock_received_in_it) it is linked,
++    explicitly via payload.requisition_id or auto-detected by requester + item match."""
++    if not payload.items and not payload.return_items:
++        raise HTTPException(status_code=400, detail="Add at least one item to issue or one asset to take back")
++    if payload.return_items and not await _can_manage_handovers(user):
++        raise HTTPException(status_code=403, detail="Only IT / Super Admin can take assets back from an employee")
+ 
+-    if payload.type == "handover":
++    items = [it.model_dump() for it in payload.items]
++    if items:
+         items = await prepare_handover_items(items)   # strict: real, available units or a clear error
+ 
+     # Resolve exactly who this slip is for (name + department, or the picked user id).
++    # Always strict now: returns are matched to the employee by id, so a wrong person is not OK.
+     emp_user = await resolve_handover_employee(
+-        payload.employee_name, payload.department_id, payload.employee_user_id,
+-        strict=(payload.type == "handover"))
++        payload.employee_name, payload.department_id, payload.employee_user_id, strict=True)
+     if emp_user:
+         payload.employee_name = emp_user["name"]
+         payload.employee_user_id = str(emp_user["_id"])
+         if not payload.department_id:
+             payload.department_id = emp_user.get("department_id")
+ 
++    return_lines = await prepare_return_items([r.model_dump() for r in payload.return_items], emp_user)
++
++    if items and return_lines:
++        slip_type, prefix = "swap", "SW"
++    elif return_lines:
++        slip_type, prefix = "takeover", "TO"
++    else:
++        slip_type, prefix = "handover", "HO"
++    slip_no = await _next_no(prefix, "handover")   # one shared counter -> slip numbers never repeat
++
+     linked_req = None
+-    if payload.type == "handover":
++    if items:
+         if payload.requisition_id and ObjectId.is_valid(payload.requisition_id):
+             r = await db.requisitions.find_one({"_id": ObjectId(payload.requisition_id)})
+             if r and r.get("status") == READY_FOR_HANDOVER_STATUS:
+@@ -3071,9 +3263,10 @@
+                 payload.employee_name, [it["item"] for it in items], payload.department_id)
+ 
+     doc = {
+-        "slip_no": slip_no, "type": payload.type, "employee_name": payload.employee_name,
++        "slip_no": slip_no, "type": slip_type, "employee_name": payload.employee_name,
+         "employee_user_id": payload.employee_user_id,
+-        "department_id": payload.department_id, "items": items, "remarks": payload.remarks,
++        "department_id": payload.department_id, "items": items, "return_items": return_lines,
++        "return_received": False, "remarks": payload.remarks,
+         "note": payload.note, "handover_date": payload.handover_date or now_iso(),
+         "prepared_by": user["name"], "prepared_by_sign": payload.prepared_by_sign,
+         "received_by_sign": payload.received_by_sign, "created_at": now_iso(),
+@@ -3081,35 +3274,36 @@
+     }
+     res = await db.handovers.insert_one(doc)
+     hid = str(res.inserted_id)
+-    reserved_ids: List[str] = []
++
++    async def undo(msg: str):
++        await _release_slip_locks(hid)
++        await db.handovers.delete_one({"_id": res.inserted_id})
++        raise HTTPException(status_code=409, detail=msg)
++
++    # 1) reserve the units being issued. Atomic: succeeds only if the unit is STILL in stock.
+     for it in items:
+         aid = it.get("asset_id")
+         if not aid or not ObjectId.is_valid(aid):
+             continue
+-        if payload.type == "handover":
+-            # Atomic reserve: succeeds only if the unit is STILL in stock and unreserved. If
+-            # someone else grabbed it a moment ago, undo this slip completely and say so.
+-            r = await db.assets.update_one(
+-                {"_id": ObjectId(aid), "status": "in_stock", "pending_receipt": {"$ne": True}},
+-                {"$set": {
+-                    "pending_receipt": True, "pending_handover_id": hid,
+-                    "assigned_to_tentative": payload.employee_name,
+-                    "assigned_department_id": payload.department_id}})
+-            if r.modified_count == 0:
+-                if reserved_ids:
+-                    await db.assets.update_many(
+-                        {"_id": {"$in": [ObjectId(x) for x in reserved_ids]}},
+-                        {"$set": {"pending_receipt": False, "pending_handover_id": None,
+-                                  "assigned_to_tentative": None, "assigned_department_id": None}})
+-                await db.handovers.delete_one({"_id": res.inserted_id})
+-                raise HTTPException(status_code=409, detail=(
+-                    "One of the selected units was just taken by another handover. "
+-                    "Nothing was saved — please pick the units again."))
+-            reserved_ids.append(aid)
+-        else:
+-            await db.assets.update_one({"_id": ObjectId(aid)}, {"$set": {
+-                "status": "returned", "assigned_to": None, "assigned_department_id": None,
+-                "pending_receipt": False, "pending_handover_id": None, "assigned_to_tentative": None}})
++        r = await db.assets.update_one(
++            {"_id": ObjectId(aid), "status": "in_stock", "pending_receipt": {"$ne": True}},
++            {"$set": {
++                "pending_receipt": True, "pending_handover_id": hid,
++                "assigned_to_tentative": payload.employee_name,
++                "assigned_department_id": payload.department_id}})
++        if r.modified_count == 0:
++            await undo("One of the selected units was just taken by another handover. "
++                       "Nothing was saved - please pick the units again.")
++
++    # 2) lock the returned assets. Atomic: succeeds only if it is STILL assigned.
++    for ln in return_lines:
++        r = await db.assets.update_one(
++            {"_id": ObjectId(ln["asset_id"]), "status": "assigned"},
++            {"$set": {"status": "return_pending", "pending_return_handover_id": hid,
++                      "pending_return_slip_no": slip_no}})
++        if r.modified_count == 0:
++            await undo(f"{ln.get('item')} ({ln.get('tag_id') or ln.get('serial_no') or 'no tag'}) "
++                       "changed while saving. Nothing was saved - reload and try again.")
+ 
+     if linked_req:
+         # Mirror /requisitions/{id}/issue-stock: put the requisition into the same
+@@ -3131,6 +3325,12 @@
+             "history": linked_req["history"], "updated_at": now_iso()}})
+ 
+     doc["_id"] = res.inserted_id
++    if payload.receive_now and return_lines:
++        try:
++            await _apply_returns(doc, user)
++        except HTTPException:
++            # keep the slip (it is valid); IT can press "Received by IT" later
++            pass
+     return await _enrich_handover(doc)
+ 
+ @api_router.post("/handovers/{hid}/deliver")
+@@ -3140,10 +3340,16 @@
+     h = await db.handovers.find_one({"_id": ObjectId(hid)})
+     if not h:
+         raise HTTPException(status_code=404, detail="Handover not found")
+-    if h.get("type") != "handover":
+-        raise HTTPException(status_code=400, detail="Only handovers (not takeovers) go through delivery confirmation")
+-    if h.get("status") == "delivered":
++    if h.get("type") not in ("handover", "swap"):
++        raise HTTPException(status_code=400, detail="Only handovers and swaps (not takeovers) go through delivery confirmation")
++    if h.get("status") in ("delivered", "confirmed"):
+         raise HTTPException(status_code=400, detail="Already marked as delivered")
++    if not await _can_manage_handovers(user):
++        raise HTTPException(status_code=403, detail="Only IT / Super Admin can mark a handover as delivered")
++
++    # Swap: the old device comes in at the same moment the new one goes out. Done FIRST so a
++    # problem with the returned asset stops the delivery before any notification is sent.
++    await _apply_returns(h, user)
+ 
+     # Resolve the employee who must confirm receipt.
+     # Priority: 1) linked requisition's requisitioner_id  2) name match on handover employee_name
+@@ -3275,8 +3481,79 @@
+         "notifications_created": max(notif_count, 1),
+     }
+ 
++class ReceiveLineIn(BaseModel):
++    """Optional per-asset correction made while physically inspecting the device."""
++    asset_id: str
++    condition: Optional[Literal["good", "damaged", "missing_parts"]] = None
++    next_status: Optional[Literal["in_stock", "under_repair", "scrapped"]] = None
++    accessories: Optional[List[str]] = None
++    data_wiped: Optional[bool] = None
++    remarks: Optional[str] = None
++
++class ReceiveReturnIn(BaseModel):
++    lines: List[ReceiveLineIn] = []
++
++@api_router.post("/handovers/{hid}/receive-return")
++async def receive_return(hid: str, payload: ReceiveReturnIn = ReceiveReturnIn(),
++                         user: dict = Depends(get_current_user)):
++    """'Received by IT': the returned device(s) of a takeover (or swap) are physically in IT's
++    hands. Each asset leaves the employee, gets its condition + destination, and lands in
++    in_stock / under_repair / scrapped. A takeover slip becomes 'completed'."""
++    if not await _can_manage_handovers(user):
++        raise HTTPException(status_code=403, detail="Only IT / Super Admin can receive returned assets")
++    if not ObjectId.is_valid(hid):
++        raise HTTPException(status_code=404, detail="Slip not found")
++    h = await db.handovers.find_one({"_id": ObjectId(hid)})
++    if not h:
++        raise HTTPException(status_code=404, detail="Slip not found")
++    if not h.get("return_items"):
++        raise HTTPException(status_code=400, detail="This slip has no returned assets to receive")
++    if h.get("return_received"):
++        raise HTTPException(status_code=400, detail="The returned assets were already received")
++    n = await _apply_returns(h, user, {l.asset_id: l.model_dump(exclude_none=True) for l in payload.lines})
++    return {"ok": True, "received": n, "status": h.get("status"), "slip_no": h.get("slip_no")}
++
++@api_router.get("/users/{user_id}/held-assets")
++async def employee_held_assets(user_id: str, user: dict = Depends(get_current_user)):
++    """Everything this employee currently holds - drives the 'Currently holding' panel on the
++    Handover form. Includes assets whose return is already in progress (flagged, not selectable)."""
++    if not (await _can_manage_handovers(user) or str(user["_id"]) == user_id):
++        raise HTTPException(status_code=403, detail="Not allowed")
++    if not ObjectId.is_valid(user_id):
++        raise HTTPException(status_code=404, detail="Employee not found")
++    emp = await db.users.find_one({"_id": ObjectId(user_id)})
++    if not emp:
++        raise HTTPException(status_code=404, detail="Employee not found")
++    docs = await db.assets.find(_held_filter(emp)).sort("assigned_at", -1).to_list(200)
++    out = []
++    for a in docs:
++        out.append({
++            "id": str(a["_id"]), "name": a.get("name"), "brand": a.get("brand"),
++            "tag_id": a.get("tag_id"), "serial_no": a.get("serial_no"),
++            "category_name": await resolve_category_name(a.get("category_id")) if a.get("category_id") else None,
++            "assigned_at": a.get("assigned_at"), "assigned_slip_no": a.get("assigned_slip_no"),
++            "status": a.get("status"), "return_pending": a.get("status") == "return_pending",
++            "pending_return_slip_no": a.get("pending_return_slip_no"),
++        })
++    return {"employee": {"id": str(emp["_id"]), "name": emp["name"], "department_id": emp.get("department_id")},
++            "assets": out}
++
++@api_router.get("/assets/{aid}/history")
++async def asset_history(aid: str, user: dict = Depends(get_current_user)):
++    """Full life history of one asset, newest first."""
++    if not await _can_manage_handovers(user):
++        raise HTTPException(status_code=403, detail="Not allowed")
++    docs = await db.asset_history.find({"asset_id": aid}).sort("at", -1).to_list(500)
++    return [strip_id(d) for d in docs]
++
+ @api_router.delete("/handovers/{hid}")
+ async def delete_handover(hid: str, user: dict = Depends(require_roles("super_admin"))):
++    h = await db.handovers.find_one({"_id": ObjectId(hid)})
++    if h and h.get("status") == "prepared":
++        # A slip that was never completed still holds locks: free the reserved stock and put
++        # assets waiting to be returned back with their employee. Completed slips only lose
++        # the record - their asset changes already happened and are kept in asset_history.
++        await _release_slip_locks(hid)
+     await db.handovers.delete_one({"_id": ObjectId(hid)})
+     return {"ok": True}
+ 
+@@ -3332,6 +3609,12 @@
+                 "assigned_slip_no": n.get("slip_no"),
+                 "receipt_confirmed": True, "receipt_confirmed_at": now_iso(),
+                 "pending_receipt": False, "pending_handover_id": None, "assigned_to_tentative": None}})
++            issued = await db.assets.find_one({"_id": ObjectId(aid)})
++            if issued:
++                await _log_asset_event(
++                    issued, "issued", n.get("employee_name") or user["name"],
++                    slip_no=n.get("slip_no"), handover_id=n.get("handover_id"),
++                    employee_user_id=n.get("user_id"), employee_name=n.get("employee_name"))
+         await db.notifications.update_one({"_id": ObjectId(nid)}, {"$set": {"status": "confirmed", "acted_at": now_iso()}})
+ 
+         hid = n.get("handover_id")
+@@ -3398,22 +3681,50 @@
+         Paragraph("<b>Primitek Group</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)),
+         Paragraph("Head Office: Primitek Tower, House 43/B, Road 24, Block CWS(B), Gulshan 1, Dhaka-1212, Bangladesh", small),
+         Spacer(1, 8),
+-        Paragraph(f"<b>{'HAND OVER' if h['type'] == 'handover' else 'TAKE OVER'}</b>", ParagraphStyle("c", parent=styles["Heading2"], alignment=1)),
++        Paragraph(f"<b>{ {'handover': 'HAND OVER', 'takeover': 'TAKE OVER', 'swap': 'ASSET REPLACEMENT (TAKE OVER + HAND OVER)'}.get(h['type'], 'HAND OVER') }</b>",
++                  ParagraphStyle("c", parent=styles["Heading2"], alignment=1)),
+         Spacer(1, 6),
+     ]
+     meta = Table([["Slip No.", ": " + h["slip_no"], "Date", ": " + (h.get("handover_date") or "")[:10]]],
+                  colWidths=[26 * mm, 55 * mm, 26 * mm, 55 * mm])
+     meta.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9)]))
+     story += [meta, Spacer(1, 8)]
+-    # Table columns match the printed Hand Over / Take Over slip exactly: S.N., Name,
+-    # Dept., Item, Brand, Quantity (Name/Dept repeated per row, matching the paper form).
+-    rows = [["S.N.", "Name", "Dept.", "Item", "Brand", "Quantity"]]
+-    for i, it in enumerate(h.get("items", []), 1):
+-        rows.append([str(i), h["employee_name"], dept_name or "-", Paragraph(it.get("item", ""), small),
+-                     it.get("brand") or "-", str(it.get("quantity", 1))])
+-    t = Table(rows, colWidths=[12 * mm, 32 * mm, 28 * mm, 55 * mm, 25 * mm, 15 * mm])
+-    t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")), ("FONTSIZE", (0, 0), (-1, -1), 8), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+-    story += [t, Spacer(1, 8)]
++    hdr_bg = colors.HexColor("#E2E8F0")
++    grid = [("GRID", (0, 0), (-1, -1), 0.5, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), hdr_bg),
++            ("FONTSIZE", (0, 0), (-1, -1), 8), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]
++    def tag_serial(it):
++        parts = [x for x in (it.get("tag_id"), it.get("serial_no")) if x]
++        return Paragraph("<br/>".join(parts) if parts else "-", small)
++
++    # Returned part (takeover / swap): what the employee handed back and in what condition.
++    ret = h.get("return_items") or []
++    if ret:
++        story.append(Paragraph("<b>ASSETS RETURNED (Taken Over from employee)</b>", small))
++        story.append(Spacer(1, 3))
++        rows = [["S.N.", "Name", "Item", "Brand", "Tag / Serial", "Condition", "Accessories"]]
++        for i, it in enumerate(ret, 1):
++            rows.append([str(i), Paragraph(h["employee_name"], small), Paragraph(it.get("item", ""), small),
++                         it.get("brand") or "-", tag_serial(it),
++                         CONDITION_LABELS.get(it.get("condition"), "-"),
++                         Paragraph(", ".join(it.get("accessories") or []) or "-", small)])
++        t = Table(rows, colWidths=[10 * mm, 26 * mm, 36 * mm, 20 * mm, 32 * mm, 22 * mm, 30 * mm])
++        t.setStyle(TableStyle(grid))
++        story += [t, Spacer(1, 8)]
++
++    # Issued part (handover / swap). Columns follow the printed slip: S.N., Name, Dept., Item,
++    # Brand, Quantity (Name/Dept repeated per row, matching the paper form) + Tag / Serial.
++    if h.get("items"):
++        if ret:
++            story.append(Paragraph("<b>ASSETS ISSUED (Handed Over to employee)</b>", small))
++            story.append(Spacer(1, 3))
++        rows = [["S.N.", "Name", "Dept.", "Item", "Brand", "Tag / Serial", "Qty"]]
++        for i, it in enumerate(h.get("items", []), 1):
++            rows.append([str(i), Paragraph(h["employee_name"], small), Paragraph(dept_name or "-", small),
++                         Paragraph(it.get("item", ""), small), it.get("brand") or "-", tag_serial(it),
++                         str(it.get("quantity", 1))])
++        t = Table(rows, colWidths=[10 * mm, 28 * mm, 24 * mm, 40 * mm, 22 * mm, 36 * mm, 12 * mm])
++        t.setStyle(TableStyle(grid))
++        story += [t, Spacer(1, 8)]
+     if h.get("note"):
+         story.append(Paragraph(f"<b>Note:</b> {h['note']}", small))
+     story.append(Paragraph("Note: You are responsible for the proper care, handling, and safekeeping of the assigned IT Equipment. In case of any damage, loss, or theft while the device is under your custody, you will bear full responsibility. You are also required to return the IT Equipment in good condition upon request or when your assignment/employment ends.", small))
+@@ -3439,6 +3750,11 @@
+     if h.get("department_id") and ObjectId.is_valid(h["department_id"]):
+         dp = await db.departments.find_one({"_id": ObjectId(h["department_id"])})
+         dept_name = dp["name"] if dp else None
++    for it in h.get("items") or []:
++        if it.get("asset_id") and ObjectId.is_valid(it["asset_id"]) and not (it.get("tag_id") or it.get("serial_no")):
++            a = await db.assets.find_one({"_id": ObjectId(it["asset_id"])})
++            if a:
++                it["tag_id"], it["serial_no"] = a.get("tag_id"), a.get("serial_no")
+     pdf = build_handover_pdf(h, dept_name)
+     return Response(content=pdf, media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{h["slip_no"]}.pdf"'})
+ 

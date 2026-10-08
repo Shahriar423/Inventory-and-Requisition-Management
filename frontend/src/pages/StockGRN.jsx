@@ -4,24 +4,31 @@ import { Plus, Trash2, Truck, Tag, Package } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/apiClient";
 import { bdt } from "@/lib/status";
 
+// Same categories as the New Requisition form (product types).
+const PRODUCT_TYPE_LABELS = { asset: "IT Asset", it_accessories: "IT Accessories", network: "Network", consumable: "Consumable", furniture: "Furniture" };
+
 export default function StockGRN() {
-  const [cats, setCats] = useState([]);
+  const [catalog, setCatalog] = useState([]);
   const [grns, setGrns] = useState([]);
-  const [head, setHead] = useState({ challan_no: "", vendor_name: "", received_date: new Date().toISOString().slice(0, 10), delivery_location: "Head Office" });
+  const [pendingReqs, setPendingReqs] = useState([]); // buy_process requisitions available to link
+  const [head, setHead] = useState({ challan_no: "", vendor_name: "", received_date: new Date().toISOString().slice(0, 10), delivery_location: "Head Office", requisition_id: "" });
   const [items, setItems] = useState([]);
-  const [entry, setEntry] = useState({ product_name: "", category_id: "", uom: "Nos", quantity: 1, rate: "" });
+  const EMPTY_ENTRY = { product_name: "", brand: "", category_id: "", uom: "Nos", quantity: 1, rate: "" };
+  const [entry, setEntry] = useState(EMPTY_ENTRY);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
-    const [c, g] = await Promise.all([api.get("/categories"), api.get("/grns")]);
-    setCats(c.data); setGrns(g.data);
+    const [g, r, pr] = await Promise.all([api.get("/grns"), api.get("/requisitions", { params: { scope: "buy-process" } }), api.get("/products")]);
+    setGrns(g.data); setPendingReqs(r.data); setCatalog(pr.data);
   }, []);
   useEffect(() => { load().catch(() => {}); }, [load]);
 
   const addItem = () => {
-    if (!entry.product_name.trim()) return toast.error("Enter product name");
-    setItems((p) => [...p, { ...entry, quantity: Number(entry.quantity), rate: Number(entry.rate) || 0, assets: [] }]);
-    setEntry({ product_name: "", category_id: "", uom: "Nos", quantity: 1, rate: "" });
+    if (!entry.product_name.trim()) return toast.error("Select a product");
+    if (!(Number(entry.quantity) >= 1)) return toast.error("Quantity must be at least 1");
+    const byQty = !!catalog.find((c) => c.name === entry.product_name)?.tracked_by_quantity;
+    setItems((p) => [...p, { ...entry, quantity: Number(entry.quantity), rate: Number(entry.rate) || 0, assets: [], tracked_by_quantity: byQty }]);
+    setEntry(EMPTY_ENTRY);
   };
   const removeItem = (i) => setItems((p) => p.filter((_, idx) => idx !== i));
   const addTag = (i) => setItems((p) => p.map((it, idx) => idx === i ? { ...it, assets: [...it.assets, { serial_no: "", tag_id: "" }] } : it));
@@ -29,12 +36,18 @@ export default function StockGRN() {
 
   const submit = async () => {
     if (!head.challan_no.trim() || !head.vendor_name.trim()) return toast.error("Challan No & Vendor are required");
+    if (!head.requisition_id) return toast.error("Select the requisition this GRN is for (or \"General stock — not linked\")");
     if (items.length === 0) return toast.error("Add at least one item");
     setSaving(true);
     try {
-      const { data } = await api.post("/grns", { ...head, items });
-      toast.success(`${data.grn_no} received · ${data.created_assets} asset(s) tagged`);
-      setItems([]); setHead({ challan_no: "", vendor_name: "", received_date: new Date().toISOString().slice(0, 10), delivery_location: "Head Office" });
+      const payload = { ...head, requisition_id: head.requisition_id === "none" ? null : head.requisition_id, items: items.map((it) => { const c = { ...it }; delete c.tracked_by_quantity; return c; }) };
+      const { data } = await api.post("/grns", payload);
+      toast.success(
+        data.requisition_advanced_to === "stock_received_in_it"
+          ? `${data.grn_no} received · ${data.created_assets} asset(s) tagged · requisition moved to "Stock Received in IT"`
+          : `${data.grn_no} received · ${data.created_assets} asset(s) tagged`
+      );
+      setItems([]); setHead({ challan_no: "", vendor_name: "", received_date: new Date().toISOString().slice(0, 10), delivery_location: "Head Office", requisition_id: "" });
       load();
     } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
     finally { setSaving(false); }
@@ -43,7 +56,7 @@ export default function StockGRN() {
   return (
     <div className="space-y-6" data-testid="grn-page">
       <div>
-        <h2 className="font-head text-2xl font-bold text-slate-900">Stock GRN (Vendor Challan)</h2>
+        <h2 className="font-head text-2xl font-bold text-slate-900">Stock GRN</h2>
         <p className="text-slate-500 text-sm mt-1">Record vendor deliveries and tag individual asset serial numbers on receipt.</p>
       </div>
 
@@ -55,14 +68,32 @@ export default function StockGRN() {
           <Field label="Delivery Location"><input data-testid="grn-location" value={head.delivery_location} onChange={(e) => setHead({ ...head, delivery_location: e.target.value })} className="ginp" /></Field>
         </div>
 
+        <div className="max-w-2xl">
+          <Field label="Link to Requisition *">
+            <select data-testid="grn-requisition" value={head.requisition_id} onChange={(e) => setHead({ ...head, requisition_id: e.target.value })} className="ginp">
+              <option value="">— Select —</option>
+              <option value="none">General stock — not linked to a requisition</option>
+              {pendingReqs.map((r) => (
+                <option key={r.id} value={r.id}>{r.requisition_no} — {r.requisitioner_name} — {r.items.map((it) => it.product_name).join(", ")}</option>
+              ))}
+            </select>
+          </Field>
+          <p className="text-xs text-slate-400 mt-1.5">
+            Selecting a requisition here moves it to "Stock Received in IT" once this GRN is submitted, so IT can issue it for handover.
+            {pendingReqs.length === 0 && " No requisitions are currently awaiting goods receipt."}
+          </p>
+        </div>
+
         <div className="border-t border-slate-100 pt-4">
-          <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
-            <Field label="Product"><input data-testid="grn-item-name" value={entry.product_name} onChange={(e) => setEntry({ ...entry, product_name: e.target.value })} className="ginp" placeholder="Laptop" /></Field>
+          <div className="grid grid-cols-1 md:grid-cols-7 gap-3 items-end">
+            <Field label="Product"><select data-testid="grn-item-name" value={entry.product_name} onChange={(e) => { const p = catalog.find((c) => c.name === e.target.value); setEntry({ ...entry, product_name: e.target.value, category_id: p ? p.product_type : "", brand: p?.brand || "" }); }} className="ginp">
+              <option value="">Select product…</option>
+              {/* Receiving stock: out-of-stock items must stay selectable - the count is only a reference. */}
+              {catalog.map((c) => <option key={c.id} value={c.name}>{c.name} — {c.in_stock} in stock</option>)}
+            </select></Field>
+            <Field label="Brand"><input data-testid="grn-item-brand" value={entry.brand} onChange={(e) => setEntry({ ...entry, brand: e.target.value })} className="ginp" placeholder="Auto" /></Field>
             <Field label="Category">
-              <select data-testid="grn-item-cat" value={entry.category_id} onChange={(e) => setEntry({ ...entry, category_id: e.target.value })} className="ginp">
-                <option value="">—</option>
-                {cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
+              <input data-testid="grn-item-cat" value={PRODUCT_TYPE_LABELS[entry.category_id] || ""} readOnly placeholder="Auto" className="ginp bg-slate-50 text-slate-600" />
             </Field>
             <Field label="UoM"><input data-testid="grn-item-uom" value={entry.uom} onChange={(e) => setEntry({ ...entry, uom: e.target.value })} className="ginp" /></Field>
             <Field label="Qty"><input type="number" min="1" data-testid="grn-item-qty" value={entry.quantity} onChange={(e) => setEntry({ ...entry, quantity: e.target.value })} className="ginp" /></Field>
@@ -79,10 +110,13 @@ export default function StockGRN() {
                   <div className="flex items-center gap-3">
                     <Package size={16} className="text-amber-600" />
                     <span className="font-medium text-slate-800">{it.product_name}</span>
+                    {it.brand && <span className="text-xs text-slate-500">{it.brand}</span>}
                     <span className="text-sm text-slate-500 font-mono">{it.quantity} {it.uom} × {bdt(it.rate)}</span>
                   </div>
                   <div className="flex items-center gap-3">
-                    <button onClick={() => addTag(i)} data-testid={`grn-add-tag-${i}`} className="text-xs font-semibold text-sky-600 hover:text-sky-800 flex items-center gap-1"><Tag size={13} /> Add Serial/Tag</button>
+                    {it.tracked_by_quantity
+                      ? <span className="text-xs text-slate-400">Consumable — tracked by quantity</span>
+                      : <button onClick={() => addTag(i)} data-testid={`grn-add-tag-${i}`} className="text-xs font-semibold text-sky-600 hover:text-sky-800 flex items-center gap-1"><Tag size={13} /> Add Serial/Tag</button>}
                     <button onClick={() => removeItem(i)} className="text-slate-400 hover:text-red-600"><Trash2 size={15} /></button>
                   </div>
                 </div>
@@ -106,7 +140,7 @@ export default function StockGRN() {
         </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-x-auto">
         <div className="px-6 py-4 border-b border-slate-100 font-head font-semibold text-slate-900">Recent GRNs</div>
         <table className="w-full text-sm">
           <thead><tr className="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-slate-100 bg-slate-50/50">
