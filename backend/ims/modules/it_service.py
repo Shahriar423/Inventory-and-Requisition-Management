@@ -16,7 +16,7 @@ from ims.common import (
     api_router,
     attach_department_names,
     attach_file_info,
-    find_dept_by_name,
+    find_dept_by_type,
     get_current_user,
     it_queue_teams_for,
     now_iso,
@@ -261,7 +261,7 @@ class RepairDecisionIn(BaseModel):
 
 
 async def _notify_it_heads(msg: str, ticket_id: str) -> None:
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     if not it_dept:
         return
     for h in await users_repo.list_dept_heads(str(it_dept["_id"])):

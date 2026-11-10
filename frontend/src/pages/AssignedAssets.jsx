@@ -258,7 +258,7 @@ export default function AssignedAssets() {
   const [attachFor, setAttachFor] = useState(null);
   const canAddExisting =
     user?.role === "super_admin" ||
-    (user?.role === "dept_head" && (user?.department_name === "IT" || user?.department_code === "IT"));
+    (user?.role === "dept_head" && user?.department_type === "it");
 
   const loadForms = useCallback(() => {
     if (!canAddExisting) return;

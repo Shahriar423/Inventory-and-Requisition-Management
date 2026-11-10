@@ -36,7 +36,7 @@ export default function POApprovals() {
         if (po.status === "pending_purchase_head_approval") {
           const isPurchaseHead =
             user.role === "purchase_head" ||
-            (user.role === "dept_head" && (user.department_name === "Purchase" || user.department_code === "PUR"));
+            (user.role === "dept_head" && user.department_type === "purchase");
           if (isSuper || isPurchaseHead) return true;
         }
         return false;

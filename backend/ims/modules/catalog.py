@@ -9,6 +9,8 @@ from ims.repositories import categories as cat_repo
 from ims.repositories import products as prod_repo
 from ims.repositories import assets as asset_repo
 from ims.common import (
+    DEPT_TYPES,
+    dept_type_of,
     ALL_MENU_KEYS,
     MENU,
     PRODUCT_TYPE_LABELS,
@@ -29,6 +31,12 @@ class DepartmentIn(BaseModel):
     name: str
     code: Optional[str] = None
     description: Optional[str] = None
+    dept_type: Optional[str] = None        # one of DEPT_TYPES (see ims/common.py); None = a plain department
+
+
+def _check_dept_type(kind: Optional[str]) -> None:
+    if kind and kind not in DEPT_TYPES:
+        raise HTTPException(status_code=400, detail="Unknown department type")
 
 
 class CategoryIn(BaseModel):
@@ -52,11 +60,18 @@ async def meta_menu(user: dict = Depends(get_current_user)):
 @api_router.get("/departments")
 async def list_departments(user: dict = Depends(get_current_user)):
     docs = await dept_repo.list_all()
-    return [{"id": str(d["_id"]), "name": d["name"], "code": d.get("code"), "description": d.get("description")} for d in docs]
+    return [{"id": str(d["_id"]), "name": d["name"], "code": d.get("code"), "description": d.get("description"),
+             "dept_type": dept_type_of(d)} for d in docs]
+
+
+@api_router.get("/department-types")
+async def list_department_types(user: dict = Depends(get_current_user)):
+    return [{"key": k, "label": v} for k, v in DEPT_TYPES.items()]
 
 
 @api_router.post("/departments")
 async def create_department(payload: DepartmentIn, user: dict = Depends(require_roles("super_admin"))):
+    _check_dept_type(payload.dept_type)
     doc = payload.model_dump()
     doc["created_at"] = now_iso()
     new_id = await dept_repo.insert(doc)
@@ -65,6 +80,7 @@ async def create_department(payload: DepartmentIn, user: dict = Depends(require_
 
 @api_router.put("/departments/{dept_id}")
 async def update_department(dept_id: str, payload: DepartmentIn, user: dict = Depends(require_roles("super_admin"))):
+    _check_dept_type(payload.dept_type)
     await dept_repo.update_fields(dept_id, payload.model_dump())
     return {"id": dept_id, **payload.model_dump()}
 

@@ -27,6 +27,7 @@ const AuditSearch = lazyWithRetry(() => import(/* webpackChunkName: "audit-searc
 const Corrections = lazyWithRetry(() => import(/* webpackChunkName: "corrections" */ "@/pages/Corrections"));
 const ITServiceQueue = lazyWithRetry(() => import(/* webpackChunkName: "i-t-service-queue" */ "@/pages/ITServiceQueue"));
 const BulkImport = lazyWithRetry(() => import(/* webpackChunkName: "bulk-import" */ "@/pages/BulkImport"));
+const Settings = lazyWithRetry(() => import(/* webpackChunkName: "settings" */ "@/pages/Settings"));
 const Users = lazyWithRetry(() => import(/* webpackChunkName: "users" */ "@/pages/Users"));
 const Departments = lazyWithRetry(() => import(/* webpackChunkName: "departments" */ "@/pages/Departments"));
 const Categories = lazyWithRetry(() => import(/* webpackChunkName: "categories" */ "@/pages/Categories"));
@@ -80,6 +81,7 @@ function App() {
               <Route path="/reports/mine" element={<MyReports />} />
               <Route path="/reports/mine/:id" element={<MyReports />} />
               <Route path="/organization/import" element={<BulkImport />} />
+              <Route path="/organization/settings" element={<Settings />} />
               <Route path="/handover/paper-records" element={<PaperRecords />} />
             </Route>
             <Route path="*" element={<Navigate to="/dashboard" replace />} />

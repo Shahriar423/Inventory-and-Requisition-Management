@@ -38,7 +38,7 @@ from ims.common import (
     _tracked_by_quantity,
     api_router,
     canonicalize_product_names,
-    find_dept_by_name,
+    find_dept_by_type,
     get_current_user,
     has_pr_raise_flag,
     now_iso,
@@ -184,7 +184,7 @@ async def assign_existing_assets(payload: AssignExistingIn, user: dict = Depends
     """Register devices an existing employee already holds (no handover slip / GRN behind
     them). Each is created directly as 'assigned' to that user, so it appears under Assigned
     Assets but never touches the available-stock count."""
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     it_dept_id = str(it_dept["_id"]) if it_dept else None
     if not (user["role"] == "super_admin" or (user["role"] == "dept_head" and user.get("department_id") == it_dept_id)):
         raise HTTPException(status_code=403, detail="Only IT / Super Admin can add existing assets to a user")

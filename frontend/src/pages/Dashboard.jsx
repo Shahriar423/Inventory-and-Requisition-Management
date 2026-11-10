@@ -61,6 +61,7 @@ export default function Dashboard() {
   }, [load]);
 
   if (!stats) return <div className="text-slate-500">Loading…</div>;
+  const isMd = user?.role === "md";          // the MD only approves / rejects Purchase Orders: one card, nothing else
   const personal = stats.scope === "personal";
   const department = stats.scope === "department";
 
@@ -69,14 +70,14 @@ export default function Dashboard() {
     user?.role === "md" ||
     user?.role === "accounts" ||
     user?.role === "purchase_head" ||
-    (user?.role === "dept_head" && (user?.department_name === "Purchase" || user?.department_code === "PUR"));
+    (user?.role === "dept_head" && user?.department_type === "purchase");
 
   // PO creators (Purchase dept, can_create_po) get the same kind of cards PR raisers get.
   const canCreatePo =
     !!user?.can_create_po ||
     user?.role === "super_admin" ||
     user?.role === "purchase_head" ||
-    (user?.role === "dept_head" && (user?.department_name === "Purchase" || user?.department_code === "PUR"));
+    (user?.role === "dept_head" && user?.department_type === "purchase");
 
   const poCards = (
     <>
@@ -130,7 +131,11 @@ export default function Dashboard() {
       {/* IT service orders waiting for the IT team (renders nothing for anyone without queue access). */}
       <ITServiceQueueCard queue={itQueue} />
 
-      {personal ? (
+      {isMd ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" data-testid="md-cards">
+          <StatCard icon={ShoppingCart} label="PO Approvals" value={stats.po_pending ?? 0} tone="bg-sky-100 text-sky-700" testid="stat-po-pending" to="/purchase/po-approvals" />
+        </div>
+      ) : personal ? (
         // Minimal 4-card layout for standard employees — no company-wide or approver-only
         // metrics (My Approvals, ≥50k BDT threshold, etc.) are relevant to them.
         <div className={`grid grid-cols-2 gap-4 ${
@@ -211,6 +216,7 @@ export default function Dashboard() {
           rather than being wedged into any one of their grids. */}
 
 
+      {!isMd && (
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-[#FBFCFE] rounded-t-xl">
           <h3 className="font-head font-semibold text-slate-900">
@@ -246,6 +252,7 @@ export default function Dashboard() {
           </tbody>
         </table>
       </div>
+      )}
 
       {personal && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm">

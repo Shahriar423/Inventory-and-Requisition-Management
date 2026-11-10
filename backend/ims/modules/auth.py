@@ -14,6 +14,7 @@ from ims.repositories import users as users_repo
 from ims.repositories import correction_cases as case_repo
 from ims.repositories import report_access as report_access_repo
 from ims.common import (
+    dept_type_of,
     ALL_MENU_KEYS,
     JWT_ALGORITHM,
     MENU,
@@ -62,7 +63,7 @@ DEFAULT_PERMISSIONS = {
          "requisition-history", "stock-list", "po-approvals",
     ],
     "md": [
-         "overview", "approve-requisition", "requisition-history", "po-approvals",
+         "overview", "requisition-history", "po-approvals",
     ],
     "purchase_head": [
          "overview", "approve-requisition",
@@ -201,11 +202,13 @@ async def login(payload: LoginIn, response: Response):
     # Enrich the same way /auth/me does so department_name and role_label_display
     # are available immediately after login (no page refresh required).
     data = clean_user(user)
-    dept = None
+    dept = dept_kind = None
     if user.get("department_id"):
         d = await dept_repo.get(user["department_id"]) if ObjectId.is_valid(user["department_id"]) else None
         dept = d["name"] if d else None
+        dept_kind = dept_type_of(d)
     data["department_name"] = dept
+    data["department_type"] = dept_kind
     data["role_label_display"] = user.get("role_label") or ROLE_LABELS.get(user.get("role"), user.get("role"))
     return {"user": data, "access_token": access}
 
@@ -242,11 +245,13 @@ async def me(response: Response, user: dict = Depends(get_current_user)):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     data = clean_user(user)
-    dept = None
+    dept = dept_kind = None
     if user.get("department_id"):
         d = await dept_repo.get(user["department_id"]) if ObjectId.is_valid(user["department_id"]) else None
         dept = d["name"] if d else None
+        dept_kind = dept_type_of(d)
     data["department_name"] = dept
+    data["department_type"] = dept_kind
     data["can_handle_pr"] = can_handle_pr(user)
     data["role_label_display"] = user.get("role_label") or ROLE_LABELS.get(user.get("role"), user.get("role"))
     return data
@@ -347,8 +352,10 @@ async def my_permissions(response: Response, user: dict = Depends(get_current_us
             allowed.append("bulk-import")
         if "paper-records" not in allowed:
             allowed.append("paper-records")
+        if "settings" not in allowed:
+            allowed.append("settings")      # business limits (MD approval limit, reminder time)
     else:
-        allowed = [k for k in allowed if k != "bulk-import"]
+        allowed = [k for k in allowed if k not in ("bulk-import", "settings")]
     # Paper Records: Super Admin and the IT Head only (also enforced on the /paper-records endpoints).
     if user["role"] != "super_admin" and not await _is_it_head(user):
         allowed = [k for k in allowed if k != "paper-records"]
@@ -391,6 +398,14 @@ async def my_permissions(response: Response, user: dict = Depends(get_current_us
             if (dg["role"] in ("md", "accounts", "purchase_head") or dg_purchase_head) and "po-approvals" not in allowed:
                 allowed.append("po-approvals")
                 delegated_only["po-approvals"] = "Delegated PO Approvals"
+
+    # The MD only approves / rejects Purchase Orders and looks back at his own decisions - nothing else,
+    # whatever a saved role setting says.
+    if user["role"] == "md":
+        allowed = [k for k in allowed if k in ("overview", "requisition-history", "po-approvals")]
+        for k in ("overview", "requisition-history", "po-approvals"):
+            if k not in allowed:
+                allowed.append(k)
 
     menu = []
     for g in MENU:

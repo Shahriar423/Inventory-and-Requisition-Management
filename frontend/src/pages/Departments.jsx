@@ -8,21 +8,24 @@ export default function Departments() {
   const [rows, setRows] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ name: "", code: "", description: "" });
+  const [form, setForm] = useState({ name: "", code: "", description: "", dept_type: "" });
+  const [types, setTypes] = useState([]);
 
   const load = useCallback(async () => {
     const { data } = await api.get("/departments");
     setRows(data);
+    api.get("/department-types").then(({ data: t }) => setTypes(t)).catch(() => {});
   }, []);
   useEffect(() => { load().catch(() => {}); }, [load]);
 
-  const openNew = () => { setEditing(null); setForm({ name: "", code: "", description: "" }); setOpen(true); };
-  const openEdit = (d) => { setEditing(d); setForm({ name: d.name, code: d.code || "", description: d.description || "" }); setOpen(true); };
+  const openNew = () => { setEditing(null); setForm({ name: "", code: "", description: "", dept_type: "" }); setOpen(true); };
+  const openEdit = (d) => { setEditing(d); setForm({ name: d.name, code: d.code || "", description: d.description || "", dept_type: d.dept_type || "" }); setOpen(true); };
 
   const save = async () => {
     try {
-      if (editing) { await api.put(`/departments/${editing.id}`, form); toast.success("Department updated"); }
-      else { await api.post("/departments", form); toast.success("Department created"); }
+      const body = { ...form, dept_type: form.dept_type || null };
+      if (editing) { await api.put(`/departments/${editing.id}`, body); toast.success("Department updated"); }
+      else { await api.post("/departments", body); toast.success("Department created"); }
       setOpen(false); load();
     } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
   };
@@ -50,6 +53,7 @@ export default function Departments() {
                 <div>
                   <div className="font-head font-semibold text-slate-900">{d.name}</div>
                   <div className="font-mono text-xs text-slate-400">{d.code || "—"}</div>
+                  {d.dept_type && <div className="text-[11px] text-amber-700 mt-0.5" data-testid={`dept-type-${d.name}`}>{(types.find((t) => t.key === d.dept_type)?.label || d.dept_type).split(" (")[0]}</div>}
                 </div>
               </div>
               <div className="flex gap-1.5">
@@ -68,6 +72,14 @@ export default function Departments() {
           <div className="space-y-3">
             <input placeholder="Name" data-testid="dept-name-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="inp2" />
             <input placeholder="Code (e.g. IT)" data-testid="dept-code-input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className="inp2" />
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">Department type</label>
+              <select data-testid="dept-type-select" value={form.dept_type} onChange={(e) => setForm({ ...form, dept_type: e.target.value })} className="inp2">
+                <option value="">Regular department (no special role)</option>
+                {types.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+              </select>
+              <p className="text-xs text-slate-400 mt-1">The system finds IT, Purchase, Admin and the head company by this type, so you can rename the department freely.</p>
+            </div>
             <textarea placeholder="Description" data-testid="dept-desc-input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="inp2" rows={3} />
           </div>
           <DialogFooter>

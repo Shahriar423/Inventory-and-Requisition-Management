@@ -17,13 +17,13 @@ export default function MyTeam() {
 
   const isPurchaseHead =
     user?.role === "dept_head" &&
-    (user?.department_name === "Purchase" || user?.department_code === "PUR");
+    user?.department_type === "purchase";
   const isItHead =
     user?.role === "dept_head" &&
-    (user?.department_name === "IT" || user?.department_code === "IT");
+    user?.department_type === "it";
   const isSuper = user?.role === "super_admin";
 
-  const flagKey = isPurchaseHead || (isSuper && user?.department_name === "Purchase")
+  const flagKey = isPurchaseHead || (isSuper && user?.department_type === "purchase")
     ? "can_create_po"
     : "can_raise_pr";
   const flagLabel = flagKey === "can_create_po" ? "Can Create PO" : "Can Raise PR";

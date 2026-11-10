@@ -54,8 +54,8 @@ export default function Users() {
   // applies to the Purchase department — neither is a role-wide setting. Hide each
   // checkbox for any other department, and clear it automatically if the department is
   // changed away from its matching department while editing.
-  const itDeptId = depts.find((d) => d.name === "IT")?.id;
-  const purchaseDeptId = depts.find((d) => d.name === "Purchase")?.id;
+  const itDeptId = depts.find((d) => d.dept_type === "it")?.id;
+  const purchaseDeptId = depts.find((d) => d.dept_type === "purchase")?.id;
   const selectedIsIT = !!itDeptId && form.department_id === itDeptId;
   const selectedIsPurchase = !!purchaseDeptId && form.department_id === purchaseDeptId;
 
@@ -205,7 +205,7 @@ export default function Users() {
           <div className="space-y-3">
             <Field label="Name"><input data-testid="user-name-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="inp" /></Field>
             <Field label="Email"><input data-testid="user-email-input" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} className="inp" /></Field>
-            <Field label={editing ? "Password (leave blank to keep)" : "Password"}><input data-testid="user-password-input" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} className="inp" placeholder={editing ? "••••••" : "default: password123"} /></Field>
+            <Field label={editing ? "Password (leave blank to keep)" : "Password"}><input data-testid="user-password-input" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} className="inp" placeholder={editing ? "••••••" : "at least 8 characters"} /></Field>
             <Field label="Department">
               <select data-testid="user-dept-select" value={form.department_id} onChange={(e) => setDepartment(e.target.value)} className="inp">
                 <option value="">—</option>

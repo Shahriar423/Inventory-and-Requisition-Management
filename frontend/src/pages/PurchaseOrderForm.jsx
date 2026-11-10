@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  ArrowLeft, Plus, Trash2, Save, Send, AlertTriangle, Check, X,
+  ArrowLeft, Plus, Trash2, Save, Send, Check, X,
 } from "lucide-react";
 import api, { API, withAuthParam, formatApiErrorDetail } from "@/lib/apiClient";
 import { bdt } from "@/lib/status";
@@ -184,7 +184,6 @@ export default function PurchaseOrderForm() {
     };
   }, [items, financial]);
 
-  const needsMd = totals.grand_total > 50000;
 
   const decide = async (action) => {
     setDecided(true);
@@ -297,9 +296,7 @@ export default function PurchaseOrderForm() {
       await api.post(`/purchase-orders/${id}/submit`);
       showResult({
         title: "Done!",
-        message: needsMd
-          ? `Purchase Order submitted. Grand total ${bdt(totals.grand_total)} → pending Purchase Head approval, then MD.`
-          : `Purchase Order submitted. Grand total ${bdt(totals.grand_total)} → pending Purchase Head approval.`,
+        message: `Purchase Order submitted. Grand total ${bdt(totals.grand_total)} → pending Purchase Head approval.`,
         onClose: () => navigate("/requisitions/purchase-order"),
       });
     } catch (e) {
@@ -324,14 +321,6 @@ export default function PurchaseOrderForm() {
           </p>
           <h1 className="text-xl font-semibold text-slate-900">Online Purchase Order (PO) Form</h1>
         </div>
-        <span className={`text-xs px-3 py-1.5 rounded-full font-medium flex items-center gap-1.5 ${
-          needsMd ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"
-        }`}>
-          <AlertTriangle size={13} />
-          {needsMd
-            ? "Routing: Purchase Head → MD → Accounts"
-            : "Routing: Purchase Head → Accounts (≤ 50,000 BDT)"}
-        </span>
       </div>
 
       <fieldset disabled={readOnly} className="space-y-4 min-w-0 border-0 p-0 m-0">

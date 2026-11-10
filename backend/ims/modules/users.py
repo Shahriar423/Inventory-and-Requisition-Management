@@ -15,6 +15,7 @@ from ims.repositories import purchase_orders as po_repo
 from ims.repositories import users as users_repo
 from ims.repositories import products as prod_repo
 from ims.common import (
+    dept_type_of,
     IT_TEAMS,
     MIN_PASSWORD_LENGTH,
     ROLES,
@@ -100,11 +101,13 @@ class UserPermissionsIn(BaseModel):
 
 async def enrich_user(u: dict) -> dict:
     data = clean_user(u)
-    dept_name = None
+    dept_name = dept_kind = None
     if u.get("department_id") and ObjectId.is_valid(u["department_id"]):
         d = await dept_repo.get(u["department_id"])
         dept_name = d["name"] if d else None
+        dept_kind = dept_type_of(d)
     data["department_name"] = dept_name
+    data["department_type"] = dept_kind
     data["role_label_display"] = u.get("role_label") or ROLE_LABELS.get(u.get("role"), u.get("role"))
     data.setdefault("it_team", None)
     return data

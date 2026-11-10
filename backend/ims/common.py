@@ -113,6 +113,7 @@ MENU = [
         {"key": "products", "label": "Products", "path": "/organization/products"},
         {"key": "users-roles", "label": "Users & Roles", "path": "/organization/users"},
         {"key": "bulk-import", "label": "Bulk Import", "path": "/organization/import"},
+        {"key": "settings", "label": "Settings", "path": "/organization/settings"},
     ]},
 ]
 
@@ -233,13 +234,59 @@ async def find_dept_by_name(name: str) -> Optional[dict]:
     return await dept_repo.get_by_name(name)
 
 
+# ---- Department TYPES ------------------------------------------------------------------------------
+# The application never relies on a department's NAME for its rules. Each department carries a `dept_type`
+# (set by the Super Admin on the Departments screen) and the code asks for "the IT department" / "the Purchase
+# department" by type, so a department can be renamed freely. Departments saved before types existed fall back
+# to their old names below, so nothing breaks until the Super Admin opens and saves them once.
+DEPT_TYPES = {
+    "it": "IT (service desk, stock, handover, PR raising)",
+    "purchase": "Purchase (PO creation and Purchase Head approval)",
+    "accounts": "Accounts",
+    "admin": "Administration (admin-track requisitions)",
+    "head_company": "Head company / top management (the MD sits here)",
+}
+_LEGACY_DEPT_NAMES = {
+    "it": r"it",
+    "purchase": r"purchases?",
+    "accounts": r"accounts?",
+    "admin": r"admin(istration)?",
+    "head_company": r"primitek\s+group",
+}
+
+
+def dept_type_of(dept: Optional[dict]) -> Optional[str]:
+    """The type of a department: the saved `dept_type`, else the type its legacy name implies, else None."""
+    if not dept:
+        return None
+    if dept.get("dept_type") in DEPT_TYPES:
+        return dept["dept_type"]
+    name = (dept.get("name") or "").strip()
+    for kind, pattern in _LEGACY_DEPT_NAMES.items():
+        if re.fullmatch(pattern, name, re.IGNORECASE):
+            return kind
+    return None
+
+
+async def find_dept_by_type(kind: str) -> Optional[dict]:
+    """The department of this type (an explicitly typed one wins over a legacy name match)."""
+    depts = await dept_repo.list_all()
+    for d in depts:
+        if d.get("dept_type") == kind:
+            return d
+    for d in depts:
+        if not d.get("dept_type") and dept_type_of(d) == kind:
+            return d
+    return None
+
+
 async def _department_is_it(department_id: Optional[str]) -> bool:
     """Can Raise PR is an IT-department-only permission (per user, not role-wide) — this
     guards it server-side so the restriction can't be bypassed by calling the API directly,
     even though the UI already hides the checkbox for non-IT users."""
     if not department_id or not ObjectId.is_valid(department_id):
         return False
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     return bool(it_dept) and str(it_dept["_id"]) == department_id
 
 
@@ -248,7 +295,7 @@ async def _department_is_purchase(department_id: Optional[str]) -> bool:
     mirrors _department_is_it exactly, for the same reasons."""
     if not department_id or not ObjectId.is_valid(department_id):
         return False
-    purchase_dept = await find_dept_by_name("Purchase")
+    purchase_dept = await find_dept_by_type("purchase")
     return bool(purchase_dept) and str(purchase_dept["_id"]) == department_id
 
 
@@ -275,7 +322,7 @@ async def resolve_approver(role: str, department_id: Optional[str] = None) -> Op
         # Anchor explicitly to that department when it exists, so MD resolution can't
         # accidentally pick up a differently-departmented user if more than one "md"
         # role is ever created.
-        pg = await find_dept_by_name("Primitek Group")
+        pg = await find_dept_by_type("head_company")
         if pg:
             scoped_to = str(pg["_id"])
     u = await users_repo.find_by_role(role, scoped_to)
@@ -384,7 +431,7 @@ PO_STAGE_ROLE = {
 
 
 async def _po_stage_holders(stage_role: str) -> List[dict]:
-    pd = await find_dept_by_name("Purchase") if stage_role == "purchase_head" else None
+    pd = await find_dept_by_type("purchase") if stage_role == "purchase_head" else None
     return await users_repo.list_po_stage_holders(stage_role, str(pd["_id"]) if pd else None)
 
 
@@ -441,10 +488,7 @@ async def po_user_can_act(po: dict, user: dict, delegators: Optional[set] = None
 
 
 async def find_admin_dept() -> Optional[dict]:
-    for d in await dept_repo.list_all():
-        if re.fullmatch(r"\s*admin(istration)?\s*", d.get("name") or "", re.IGNORECASE):
-            return d
-    return None
+    return await find_dept_by_type("admin")
 
 
 def build_pr_chain(total_amount: float) -> List[dict]:
@@ -462,7 +506,7 @@ def build_pr_chain(total_amount: float) -> List[dict]:
 
 
 async def resolve_pr_chain_approvers(pr_steps: List[dict]) -> List[dict]:
-    purchase_dept = await find_dept_by_name("Purchase")
+    purchase_dept = await find_dept_by_type("purchase")
     purchase_dept_id = str(purchase_dept["_id"]) if purchase_dept else None
     for s in pr_steps:
         if s["role"] == "purchase_head":
@@ -895,7 +939,7 @@ async def _can_manage_handovers(user: dict) -> bool:
     """Same people who can open the Handover module: Super Admin, the IT head, or the PR raiser."""
     if user.get("role") == "super_admin" or has_pr_raise_flag(user):
         return True
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     return bool(it_dept and user.get("role") == "dept_head"
                 and user.get("department_id") == str(it_dept["_id"]))
 
@@ -1452,7 +1496,7 @@ async def _cor_mirror(case: dict, by: str, action: str, note: str) -> None:
 
 
 async def _cor_it_heads() -> List[dict]:
-    it = await find_dept_by_name("IT")
+    it = await find_dept_by_type("it")
     if not it:
         return []
     return await users_repo.list_dept_heads(str(it["_id"]), 20)

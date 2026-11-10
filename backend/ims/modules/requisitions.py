@@ -56,7 +56,8 @@ from ims.common import (
     canonicalize_product_names,
     collect_audit_data,
     find_admin_dept,
-    find_dept_by_name,
+    find_dept_by_type,
+    dept_type_of,
     find_requisition_for_audit,
     get_current_user,
     get_po_threshold,
@@ -177,7 +178,7 @@ async def build_approval_chain(req_type: str, requester: dict, items: Optional[L
             "status": "pending", "note": None, "acted_at": None, "pending_since": now_iso(),
         })
 
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     it_dept_id = str(it_dept["_id"]) if it_dept else None
 
     if is_admin_track(req_type, items or []):
@@ -208,7 +209,7 @@ async def make_it_head_review_step(level: int) -> dict:
     stage="pr_review" so status_for_step() can recognize it distinctly from the legacy
     base-chain "IT Head" step that older, already-created requisitions may still carry —
     a plain label/role match would risk conflating the two."""
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     it_dept_id = str(it_dept["_id"]) if it_dept else None
     approver = await resolve_approver("dept_head", it_dept_id)
     return {
@@ -269,12 +270,10 @@ async def apply_it_employee_base_bypass(chain: List[dict], requester: dict) -> b
 
 
 async def _department_is_accounts_or_purchase(department_id: Optional[str]) -> bool:
-    """True if department_id is the Accounts or the Purchase department (name matched
-    case-insensitively, so 'Accounts' / 'Account' / 'Purchase' / 'Purchases' all work)."""
+    """True if department_id is the Accounts or the Purchase department (by department type)."""
     if not department_id or not ObjectId.is_valid(department_id):
         return False
-    d = await dept_repo.get(department_id)
-    return bool(d) and re.fullmatch(r"\s*(accounts?|purchases?)\s*", d.get("name") or "", re.IGNORECASE) is not None
+    return dept_type_of(await dept_repo.get(department_id)) in ("accounts", "purchase")
 
 
 async def apply_accounts_purchase_executive_bypass(chain: List[dict], requester: dict,
@@ -714,6 +713,28 @@ async def list_requisitions(response: Response, scope: str = "all", status: Opti
     # (dept_head/accounts/purchase_head — their own department's requisitions), or global
     # (super_admin/md — company-wide). See req_visibility_scope().
     query, _vis = req_visibility_scope(user)
+    if user["role"] == "md":
+        # The MD sees only what he decided himself: requisitions whose Purchase Order he approved or rejected.
+        if scope != "history":
+            return []
+        want = {"approved": {"approve"}, "rejected": {"reject"}}.get(status or "", {"approve", "reject"})
+        rids = []
+        for po in await po_repo.list_submitted():
+            if any(c.get("role") == "md" and c.get("action") in want for c in po.get("approval_comments") or []):
+                if po.get("requisition_id") and po["requisition_id"] not in rids:
+                    rids.append(po["requisition_id"])
+        docs = [d for d in [await req_repo.get(r) for r in rids] if d]
+        if q and q.strip():
+            ql = q.strip().lower()
+            docs = [d for d in docs if ql in " ".join(str(d.get(k) or "") for k in ("requisition_no", "requisitioner_name", "requisition_type")).lower()]
+        docs.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+        response.headers["X-Total-Count"] = str(len(docs))
+        if page:
+            size = max(1, min(page_size, 200))
+            docs = docs[(max(page, 1) - 1) * size: max(page, 1) * size]
+        if lean:
+            docs = [{k: v for k, v in d.items() if k != "history"} for d in docs]
+        return _flag_modifiable(await redact_approval_notes(await attach_po_approvals(await attach_department_names(await attach_file_info([serialize_req(d) for d in docs]))), user), user)
     if scope in ("purchase", "pending_pr", "approve"):
         await recheck_pending_pr_against_stock()
     if scope == "mine":
@@ -764,7 +785,7 @@ async def list_requisitions(response: Response, scope: str = "all", status: Opti
         # Items ready to be physically handed over — IT prints the slip and clicks
         # "Handover Done". Not a chain-step assignment either, so it's role-gated here
         # rather than matched against approver_id.
-        it_dept = await find_dept_by_name("IT")
+        it_dept = await find_dept_by_type("it")
         it_dept_id = str(it_dept["_id"]) if it_dept else None
         admin_dept = await find_admin_dept()
         is_admin_head = bool(admin_dept) and user["role"] == "dept_head" and user.get("department_id") == str(admin_dept["_id"])
@@ -1336,7 +1357,7 @@ async def dashboard_stats(response: Response, user: dict = Depends(get_current_u
     pending = await req_repo.count_filtered({**base_filter, "status": {"$nin": FINALIZED}})
     approved = await req_repo.count_filtered({**base_filter, "status": {"$in": ["approved", "handover_done"]}})
     rejected = await req_repo.count_filtered({**base_filter, "status": "rejected"})
-    high_value = await req_repo.count_filtered({**base_filter, "total_amount": {"$gte": MD_THRESHOLD}})
+    high_value = await req_repo.count_filtered({**base_filter, "total_amount": {"$gte": await get_po_threshold()}})
     action_required = await req_repo.count_filtered({**base_filter, "status": "revision_requested"})
     in_progress = await req_repo.count_filtered({
         **base_filter, "status": {"$nin": FINALIZED + ["revision_requested"]}})
@@ -1970,7 +1991,7 @@ async def issue_stock_for_requisition(req_id: str, user: dict = Depends(get_curr
     received via GRN against this requisition (status == stock_received_in_it). Generates
     the handover (same shape as the in-stock Path A) and pushes an info notification to the
     requester ahead of the later physical-receipt confirmation."""
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     it_dept_id = str(it_dept["_id"]) if it_dept else None
     if not (user["role"] == "super_admin" or (user["role"] == "dept_head" and user.get("department_id") == it_dept_id)):
         raise HTTPException(status_code=403, detail="Only the IT team can issue stock for a requisition")
@@ -2005,7 +2026,7 @@ async def cancel_pending_pr(req_id: str, payload: CancelPRIn = CancelPRIn(), use
     needed so it leaves the PR queue and the requester sees status 'PR Cancelled'."""
     can_raise = bool(user.get("can_raise_pr")) or user["role"] == "super_admin"
     if not can_raise:
-        it_dept = await find_dept_by_name("IT")
+        it_dept = await find_dept_by_type("it")
         it_dept_id = str(it_dept["_id"]) if it_dept else None
         is_it_head = user["role"] == "dept_head" and user.get("department_id") == it_dept_id
         if not is_it_head:
@@ -2028,7 +2049,7 @@ async def cancel_pending_pr(req_id: str, payload: CancelPRIn = CancelPRIn(), use
 
 
 async def service_queue_bypass_step(team: Optional[str] = None) -> dict:
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     where = f" -> {IT_TEAM_LABELS[team]} queue" if team else ""
     return {
         "level": 1, "role": "dept_head", "label": f"IT Head approval bypassed{where}",
@@ -2055,7 +2076,7 @@ async def route_service_requisition(doc: dict) -> None:
 async def notify_service_queue(doc: dict) -> None:
     """Bell notification to the owning sub-team's executives and the IT Head."""
     team = doc.get("it_team")
-    it_dept = await find_dept_by_name("IT")
+    it_dept = await find_dept_by_type("it")
     if not team or not it_dept:
         return
     msg = f"New {IT_TEAM_LABELS[team]} ticket {doc['requisition_no']}: {doc['items'][0]['product_name']} (requested by {doc['requisitioner_name']})."

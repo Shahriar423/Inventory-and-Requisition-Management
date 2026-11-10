@@ -26,7 +26,7 @@ from ims.common import (
     ROLE_LABELS,
     _is_it_head,
     api_router,
-    find_dept_by_name,
+    find_dept_by_type,
     generate_temp_password,
     get_current_user,
     hash_password,
@@ -194,8 +194,8 @@ async def _imp_validate_users(rows: List[tuple]) -> List[dict]:
     from pydantic import TypeAdapter
     email_ta = TypeAdapter(EmailStr)
     depts = {_imp_norm(d["name"]): d for d in await dept_repo.list_all()}
-    it_dept = await find_dept_by_name("IT")
-    purchase_dept = await find_dept_by_name("Purchase")
+    it_dept = await find_dept_by_type("it")
+    purchase_dept = await find_dept_by_type("purchase")
     it_id = str(it_dept["_id"]) if it_dept else None
     po_id = str(purchase_dept["_id"]) if purchase_dept else None
     existing = {(u.get("email") or "").lower() for u in await users_repo.list_all(only_fields=["email"])}
