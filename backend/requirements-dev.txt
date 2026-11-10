@@ -1,0 +1,7 @@
+# Only needed to run the tests:  pip install -r requirements-dev.txt
+# They need a MySQL 8 server:  MYSQL_TEST_URL=mysql://user:password@127.0.0.1:3306/ims_test pytest
+-r requirements.txt
+pytest
+pytest-xdist
+httpx
+# optional - only for the legacy Mongo import tool tests:  mongomock pymongo

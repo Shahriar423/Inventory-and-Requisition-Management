@@ -1,0 +1,3 @@
+# One-time Mongo -> MySQL copy/verify tool only (python -m migration.mysql.migrate copy|verify). The application does not need MongoDB.
+-r ../../requirements.txt
+pymongo>=4.6
