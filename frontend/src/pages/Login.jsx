@@ -262,7 +262,7 @@ export default function Login() {
               <b className="font-semibold text-[#E11D2E]">Forgot your password?</b> Please contact the IT Team.
             </p>
             <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-slate-400 font-mono">
-              <ShieldCheck size={14} /> Primitek IMS · Secure Sign-in
+              <ShieldCheck size={14} /> Secure Sign-in  ·  IRM v1.0
             </p>
           </form>
         </div>
