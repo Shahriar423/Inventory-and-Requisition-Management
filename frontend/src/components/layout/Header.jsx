@@ -1,25 +1,19 @@
 import { useState } from "react";
-import { LogOut, Menu, KeyRound, ChevronDown } from "lucide-react";
+import { LogOut, Menu, KeyRound, ChevronDown, Camera } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import NotificationBell from "@/components/NotificationBell";
 import DelegationDialog from "@/components/DelegationDialog";
 import ChangePasswordDialog from "@/components/ChangePasswordDialog";
+import ProfilePhotoDialog from "@/components/ProfilePhotoDialog";
+import Avatar from "@/components/Avatar";
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 
-function initials(name) {
-  return (name || "?")
-    .split(" ")
-    .map((p) => p[0])
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-}
-
 export default function Header({ title, onMenuClick, navOpen }) {
   const { user, logout } = useAuth();
   const [pwOpen, setPwOpen] = useState(false);
+  const [photoOpen, setPhotoOpen] = useState(false);
 
   return (
     <header className="h-16 sticky top-0 z-20 bg-white border-b border-slate-200 flex items-center justify-between px-6" data-testid="app-header">
@@ -50,9 +44,7 @@ export default function Header({ title, onMenuClick, navOpen }) {
               data-testid="profile-menu-btn"
               className="flex items-center gap-3 pl-5 border-l border-slate-200 py-1 pr-2 rounded-lg hover:bg-slate-50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
             >
-              <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center font-semibold text-sm" data-testid="user-avatar">
-                {initials(user?.name)}
-              </div>
+              <Avatar user={user} size={40} testid="user-avatar" />
               <div className="text-left leading-tight hidden sm:block">
                 <div className="text-sm font-semibold text-slate-900" data-testid="user-name">{user?.name}</div>
                 <div className="text-xs text-slate-500" data-testid="user-role">{user?.role_label_display}</div>
@@ -62,14 +54,25 @@ export default function Header({ title, onMenuClick, navOpen }) {
           </DropdownMenuTrigger>
 
           <DropdownMenuContent align="end" sideOffset={8} className="w-72 p-0 overflow-hidden" data-testid="profile-menu">
-            <div className="px-4 py-3.5 bg-slate-50 border-b border-slate-200">
-              <div className="text-sm font-semibold text-slate-900 truncate">{user?.name}</div>
-              <div className="text-xs text-slate-500 truncate">{user?.email}</div>
-              <div className="text-xs text-slate-500 mt-0.5 truncate">
-                {[user?.role_label_display, user?.department_name].filter(Boolean).join(" · ")}
+            <div className="px-4 py-3.5 bg-slate-50 border-b border-slate-200 flex items-center gap-3">
+              <Avatar user={user} size={44} />
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-slate-900 truncate">{user?.name}</div>
+                <div className="text-xs text-slate-500 truncate">{user?.email}</div>
+                <div className="text-xs text-slate-500 mt-0.5 truncate">
+                  {[user?.role_label_display, user?.department_name].filter(Boolean).join(" · ")}
+                </div>
               </div>
             </div>
             <div className="p-1.5">
+              <DropdownMenuItem
+                onSelect={() => setPhotoOpen(true)}
+                data-testid="change-photo-btn"
+                className="gap-3 px-3 py-2.5 text-sm cursor-pointer rounded-md"
+              >
+                <Camera size={17} className="text-slate-500" />
+                <span className="font-medium text-slate-700">Change profile picture</span>
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onSelect={() => setPwOpen(true)}
                 data-testid="change-password-btn"
@@ -93,6 +96,7 @@ export default function Header({ title, onMenuClick, navOpen }) {
       </div>
 
       <ChangePasswordDialog open={pwOpen} onOpenChange={setPwOpen} />
+      <ProfilePhotoDialog open={photoOpen} onOpenChange={setPhotoOpen} />
     </header>
   );
 }
