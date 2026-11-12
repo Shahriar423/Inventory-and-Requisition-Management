@@ -359,6 +359,13 @@ async def my_permissions(response: Response, user: dict = Depends(get_current_us
     # Paper Records: Super Admin and the IT Head only (also enforced on the /paper-records endpoints).
     if user["role"] != "super_admin" and not await _is_it_head(user):
         allowed = [k for k in allowed if k != "paper-records"]
+    # Stock List: the IT Head, PR raisers and Super Admin only (also enforced on GET /assets/stock-summary).
+    # A role-wide setting saved in Approver Management can no longer hide it from them.
+    if user["role"] == "super_admin" or can_handle_pr(user) or await _is_it_head(user):
+        if "stock-list" not in allowed:
+            allowed.append("stock-list")
+    else:
+        allowed = [k for k in allowed if k != "stock-list"]
 
     # Corrections: IT / Super Admin run the cases; anyone who reported (or was asked about) one sees "My Corrections".
     allowed = [k for k in allowed if k not in ("corrections", "my-corrections")]

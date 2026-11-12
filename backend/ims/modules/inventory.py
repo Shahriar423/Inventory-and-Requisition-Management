@@ -21,6 +21,8 @@ from ims.repositories import handovers as handover_repo
 from ims.repositories import grns as grn_repo
 from ims.repositories import asset_history as ah_repo
 from ims.common import (
+    _is_it_head,
+    can_handle_pr,
     ASSET_HELD_STATUSES,
     CONDITION_LABELS,
     _apply_returns,
@@ -39,6 +41,8 @@ from ims.common import (
     api_router,
     canonicalize_product_names,
     find_dept_by_type,
+    general,
+    esc,
     get_current_user,
     has_pr_raise_flag,
     now_iso,
@@ -106,6 +110,8 @@ async def stock_summary(user: dict = Depends(get_current_user)):
     confirms receipt; see notifications/confirm). Per-asset detail fields
     (serial_no, tag_id, assigned_to, status) are intentionally NOT included
     here; use GET /assets for that granular, item-level view."""
+    if not (user["role"] == "super_admin" or can_handle_pr(user) or await _is_it_head(user)):
+        raise HTTPException(status_code=403, detail="Only the IT Head and PR raisers can view the Stock List")
     rows = await asset_repo.stock_summary()
     out = []
     for r in rows:
@@ -700,8 +706,8 @@ def build_handover_pdf(h: dict, dept_name: Optional[str]) -> bytes:
     styles = getSampleStyleSheet()
     small = ParagraphStyle("s", parent=styles["Normal"], fontSize=8, leading=10)
     story = [
-        Paragraph("<b>Primitek Group</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)),
-        Paragraph("Head Office: Primitek Tower, House 43/B, Road 24, Block CWS(B), Gulshan 1, Dhaka-1212, Bangladesh", small),
+        Paragraph(f"<b>{esc(general()['company_name'])}</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)),
+        Paragraph(esc(general()["company_address"]), small),
         Spacer(1, 8),
         Paragraph(f"<b>{ {'handover': 'HAND OVER', 'takeover': 'TAKE OVER', 'swap': 'ASSET REPLACEMENT (TAKE OVER + HAND OVER)'}.get(h['type'], 'HAND OVER') }</b>",
                   ParagraphStyle("c", parent=styles["Heading2"], alignment=1)),
@@ -791,7 +797,7 @@ def build_assets_summary_pdf(assets: list, employees: int = 0) -> bytes:
     small = ParagraphStyle("s", parent=styles["Normal"], fontSize=8, leading=10)
     tiny = ParagraphStyle("t", parent=styles["Normal"], fontSize=6.5, leading=8, textColor=colors.HexColor("#B45309"))
     story = [
-        Paragraph("<b>Primitek Group</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)),
+        Paragraph(f"<b>{esc(general()['company_name'])}</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)),
         Paragraph("Assigned Assets \u2014 Inventory Register", small),
         Paragraph(f"Generated: {now_iso()[:19].replace('T', ' ')} UTC &nbsp;|&nbsp; "
                   f"{len(assets)} asset(s) assigned to {employees} employee(s)", small),

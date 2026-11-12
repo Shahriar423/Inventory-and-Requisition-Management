@@ -87,7 +87,7 @@ function App() {
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </BrowserRouter>
-        <Toaster position="top-right" richColors />
+        <Toaster position="top-center" richColors />
         <ResultPopupHost />
       </AuthProvider>
     </div>

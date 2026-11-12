@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ClipboardList, Clock, CheckCircle2, Inbox, XCircle, AlertCircle, DollarSign, ShoppingCart, FileText, UserCheck } from "lucide-react";
 import api, { onDataRefresh } from "@/lib/apiClient";
 import { StatusBadge, bdt } from "@/lib/status";
@@ -36,6 +36,8 @@ export default function Dashboard() {
   const itQueue = useITServiceQueue();      // IT service-queue counts; tiles sit in the stat grids below
   const hasIt = itQueue.enabled;
   const [stats, setStats] = useState(null);
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const load = useCallback(() => {
     api.get("/dashboard/stats", { params: { _t: Date.now() } }).then(({ data }) => setStats(data)).catch(() => {});
@@ -59,6 +61,21 @@ export default function Dashboard() {
       window.removeEventListener("focus", whenVisible);
     };
   }, [load]);
+
+  // Opened from a notification (/dashboard?focus=my-queue or po-pending): scroll to that card and flash it so
+  // the approver sees exactly which card needs attention, then tidy the address bar.
+  useEffect(() => {
+    const focus = new URLSearchParams(location.search).get("focus");
+    if (!focus || !stats) return;
+    const el = document.querySelector(`[data-testid="stat-${focus}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      const marks = ["ring-4", "ring-amber-400", "ring-offset-2", "animate-pulse"];
+      el.classList.add(...marks);
+      setTimeout(() => el.classList.remove(...marks), 4500);
+    }
+    navigate("/dashboard", { replace: true });
+  }, [location.search, stats, navigate]);
 
   if (!stats) return <div className="text-slate-500">Loading…</div>;
   const isMd = user?.role === "md";          // the MD only approves / rejects Purchase Orders: one card, nothing else
@@ -94,7 +111,7 @@ export default function Dashboard() {
             {personal ? "My Dashboard" : department ? "Department Overview" : "Overview"}
           </h2>
           <p className="text-slate-500 text-sm mt-1">
-            {personal ? "Your requisition cards"
+            {personal ? "Your own requisitions and assigned assets."
               : department ? "Requisitions and assets within your department."
               : "Snapshot of requisitions across the organization."}
           </p>

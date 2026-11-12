@@ -44,6 +44,9 @@ from ims.common import (
     _next_no,
     _notify,
     _notify_with_delegate,
+    notify_current_approver,
+    notify_returned,
+    notify_work_queue,
     _pkey,
     active_delegators_of,
     api_router,
@@ -57,6 +60,9 @@ from ims.common import (
     collect_audit_data,
     find_admin_dept,
     find_dept_by_type,
+    general,
+    esc,
+    tz_short,
     dept_type_of,
     find_requisition_for_audit,
     get_current_user,
@@ -656,6 +662,10 @@ async def create_requisition(payload: RequisitionIn, user: dict = Depends(get_cu
         await req_repo.save_creation_routing(doc["_id"], status=doc["status"], approval_chain=doc["approval_chain"],
                                              extra=extra)
 
+    if payload.requisition_type != "service":
+        fresh = await req_repo.get(doc["_id"])
+        await notify_current_approver(fresh or doc)      # first approver: bell + dashboard card
+
     doc["id"] = str(doc["_id"])
     doc.pop("_id", None)
     return doc
@@ -954,17 +964,14 @@ async def act_on_requisition(req_id: str, payload: ApproveIn, user: dict = Depen
     await req_repo.save_decision(req_id, approval_chain=chain, status=d["status"], history=d["history"],
                                  updated_at=d["updated_at"], extra=extra_set)
 
-    # An approver's (optional) note travels with the requisition: it is stored on their chain step
-    # (shown to everyone who opens the requisition) and the NEXT approver is told about it too.
-    if payload.action == "approve" and (payload.note or "").strip():
-        nxt = next((st for st in chain if st.get("status") == "pending" and st.get("approver_id")), None)
-        if nxt and ObjectId.is_valid(nxt["approver_id"]):
-            nxt_user = await users_repo.get(nxt["approver_id"])
-            await _notify_with_delegate(
-                nxt_user, "approval_note",
-                f"{user['name']} approved {d['requisition_no']} ({current.get('label') or 'approval'}) "
-                f"with a note: \"{payload.note.strip()}\"",
-                requisition_id=str(d["_id"]))
+    # The NEXT approver is told it is their turn (bell item opens the "Current Approval Need" card); the
+    # approver's optional note travels with that notification. The note is also kept on the chain step.
+    fresh = await req_repo.get(req_id) or d
+    if payload.action == "approve" and d["status"] not in FINALIZED:
+        await notify_current_approver(fresh, actor=user["name"], note=payload.note)
+        await notify_work_queue(fresh)
+    elif payload.action in ("revise", "pr_revise", "reject"):
+        await notify_returned(fresh, payload.action, user["name"], payload.note)
     return serialize_req(d)
 
 
@@ -1077,6 +1084,7 @@ async def resubmit_requisition(req_id: str, payload: ResubmitIn, user: dict = De
     update.update({"approval_chain": chain, "status": d["status"],
                    "history": d["history"], "updated_at": d["updated_at"]})
     await req_repo.save_resubmission(req_id, update)
+    await notify_current_approver(await req_repo.get(req_id) or d, actor=user["name"], verb="resubmitted after changes:")
     return serialize_req(d)
 
 
@@ -1607,6 +1615,8 @@ async def file_non_financial_pr(req_id: str, payload: FilePRIn, user: dict = Dep
         delivery_location=d.get("delivery_location"),
         pr_attachment_file_ids=d.get("pr_attachment_file_ids", []),
         pr_filed_by=user["name"], pr_filed_by_id=str(user["_id"]))
+    fresh = await req_repo.get(req_id)
+    await notify_current_approver(fresh or d, actor=user["name"], verb="filed the Purchase Requisition for")
     return serialize_req(d)
 
 
@@ -1796,8 +1806,8 @@ def build_pr_pdf(req: dict, pr_no: str, dept_name: str) -> bytes:
     styles = getSampleStyleSheet()
     small = ParagraphStyle("small", parent=styles["Normal"], fontSize=8, leading=10)
     story = []
-    story.append(Paragraph("<b>Primitek Industries Limited</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)))
-    story.append(Paragraph("A concern of Primitek Group — Delivering Excellence", small))
+    story.append(Paragraph(f"<b>{esc(general()['company_legal_name'])}</b>", ParagraphStyle("h", parent=styles["Title"], fontSize=15)))
+    story.append(Paragraph(esc(general()["company_tagline"]), small))
     story.append(Spacer(1, 6))
     story.append(Paragraph("<b>Purchase Requisition</b>", ParagraphStyle("c", parent=styles["Heading2"], alignment=1)))
     story.append(Spacer(1, 8))
@@ -1840,7 +1850,7 @@ def build_pr_pdf(req: dict, pr_no: str, dept_name: str) -> bytes:
     ]))
     story.append(tbl)
     story.append(Spacer(1, 6))
-    story.append(Paragraph(f"<b>Total Amount:</b> BDT {req.get('total_amount', 0):,.2f}", small))
+    story.append(Paragraph(f"<b>Total Amount:</b> {esc(general()['currency_code'])} {req.get('total_amount', 0):,.2f}", small))
     if req.get("requester_note"):
         story.append(Paragraph(f"<b>Note:</b> {req['requester_note']}", small))
     story.append(Spacer(1, 26))
@@ -2097,7 +2107,7 @@ def build_audit_pdf(data: dict, generated_by: str) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=16 * mm, bottomMargin=16 * mm,
                             leftMargin=14 * mm, rightMargin=14 * mm,
-                            title=f"Audit Report {d['requisition_no']}", author="Primitek Group")
+                            title=f"Audit Report {d['requisition_no']}", author=general()["company_name"])
     ss = getSampleStyleSheet()
     body = ParagraphStyle("ab", parent=ss["Normal"], fontSize=8.5, leading=11)
     bold = ParagraphStyle("abb", parent=body, fontName="Helvetica-Bold")
@@ -2130,8 +2140,8 @@ def build_audit_pdf(data: dict, generated_by: str) -> bytes:
         return t
 
     story = []
-    story.append(P("<b>Primitek Group</b>", ParagraphStyle("t1", parent=ss["Title"], fontSize=16, spaceAfter=0)))
-    story.append(P("Master Audit Report - Requisition Lifecycle (all times UTC+6, Bangladesh)", ParagraphStyle("t2", parent=body, alignment=1, fontSize=10, textColor=colors.HexColor("#475569"))))
+    story.append(P(f"<b>{esc(general()['company_name'])}</b>", ParagraphStyle("t1", parent=ss["Title"], fontSize=16, spaceAfter=0)))
+    story.append(P(f"Master Audit Report - Requisition Lifecycle (all times {tz_short()}, {esc(general()['timezone_label'])})", ParagraphStyle("t2", parent=body, alignment=1, fontSize=10, textColor=colors.HexColor("#475569"))))
     story.append(Spacer(1, 6))
     story.append(P(f"<b>{_a_txt(d['requisition_no'])}</b> &nbsp; <font size=9 color='#475569'>"
                    f"{'Service Requisition (SR)' if is_sr else 'Product Requisition (PR)'}</font>",
@@ -2222,7 +2232,7 @@ def build_audit_pdf(data: dict, generated_by: str) -> bytes:
             story.append(kv([
                 ("PO Number", _a_txt(po.get("po_number"))), ("PO Status", _a_txt((po.get("status") or "").replace("_", " ").title())),
                 ("PO Created By", _a_txt(po.get("created_by"))), ("Created On", _a_dt(po.get("created_at"))),
-                ("Vendor", _a_txt(po.get("vendor_name"))), ("Grand Total (BDT)", f"{po.get('grand_total', 0):,.2f}"),
+                ("Vendor", _a_txt(po.get("vendor_name"))), (f"Grand Total ({general()['currency_code']})", f"{po.get('grand_total', 0):,.2f}"),
             ]))
             rows = [["PO Approval Stage", "Approver", "Decision", "Date / Time", "Comment"]]
             for c in po.get("approval_comments") or []:
@@ -2256,7 +2266,7 @@ def build_audit_pdf(data: dict, generated_by: str) -> bytes:
             ]))
             tail = []
             if h.get("items"):
-                irows = [["#", "Item", "Tag / Serial", "Qty", "Unit Price (BDT)", "Total (BDT)", "GRN"]]
+                irows = [["#", "Item", "Tag / Serial", "Qty", f"Unit Price ({general()['currency_code']})", f"Total ({general()['currency_code']})", "GRN"]]
                 grand, any_price = 0.0, False
                 for n, i in enumerate(h["items"], 1):
                     q = int(i.get("quantity") or 1)
@@ -2333,7 +2343,7 @@ def build_audit_pdf(data: dict, generated_by: str) -> bytes:
         rows.append([str(i), _a_dt(e["at"]), _a_txt(e["by"]), _a_txt(e["event"]), _a_txt(e["note"])])
     story.append(grid(rows, [8 * mm, 34 * mm, 32 * mm, 50 * mm, 58 * mm]))
 
-    ref, stamp = d["requisition_no"], _a_dt(datetime.now(timezone.utc)) + " (UTC+6)"
+    ref, stamp = d["requisition_no"], _a_dt(datetime.now(timezone.utc)) + f" ({tz_short()})"
     class _Numbered(_rl_canvas.Canvas):
         def __init__(self, *a, **k):
             super().__init__(*a, **k); self._pages = []

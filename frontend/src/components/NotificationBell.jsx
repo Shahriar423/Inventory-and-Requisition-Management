@@ -10,6 +10,16 @@ const REASONS = [
   ["wrong_spec", "Wrong size or specification"], ["wrong_model", "Wrong model or brand"], ["damaged", "Damaged or not working"],
   ["missing_accessory", "Missing accessory"], ["quantity_short", "Quantity short"], ["nothing_delivered", "Nothing delivered"], ["other", "Other"],
 ];
+// Where a notification should take the user: approval notifications open the approval list directly
+// (requisitions to approve, or Purchase Orders to approve), including older ones saved with another link.
+const APPROVAL_TYPES = ["approval_needed", "approval_note", "requisition_edited", "approval_reminder", "po_approval_needed"];
+// Other workflow notifications carry their own link (sent back for changes, rejected, work waiting for you ...).
+const FLOW_TYPES = ["revision_requested", "pr_revision_requested", "requisition_rejected", "work_assigned", "po_rejected", "po_approved"];
+function targetFor(n) {
+  if (n.type === "po_approval_needed" || n.po_id) return "/purchase/po-approvals";
+  if (APPROVAL_TYPES.includes(n.type)) return "/requisitions/approve";
+  return n.link || null;
+}
 const CORRECTION_TYPES = ["correction_reported", "correction_update", "correction_clarification", "correction_reminder", "correction_escalated"];
 
 function SpecRow({ label, requested, delivered, mono }) {
@@ -115,9 +125,9 @@ export default function NotificationBell() {
       setActive(n); setMode("view"); setConfirmOpen(true); setListOpen(false);
     } else if (n.type === "asset_receipt" && n.correction_case_id) {
       navigate(`/corrections/${n.correction_case_id}`); setListOpen(false);
-    } else if (CORRECTION_TYPES.includes(n.type) && n.link) {
+    } else if ((CORRECTION_TYPES.includes(n.type) || APPROVAL_TYPES.includes(n.type) || FLOW_TYPES.includes(n.type)) && targetFor(n)) {
       setListOpen(false);
-      navigate(n.link);
+      navigate(targetFor(n));
       try { await api.post(`/notifications/${n.id}/read`); setNotes((p) => p.filter((x) => x.id !== n.id)); } catch { /* silent */ }
     }
   };
@@ -147,7 +157,7 @@ export default function NotificationBell() {
             <ul className="max-h-80 overflow-y-auto divide-y divide-slate-100">
               {notes.map((n) => {
                 const reported = n.status === "correction";
-                const clickable = n.type === "asset_receipt" || (CORRECTION_TYPES.includes(n.type) && n.link);
+                const clickable = n.type === "asset_receipt" || ((CORRECTION_TYPES.includes(n.type) || APPROVAL_TYPES.includes(n.type) || FLOW_TYPES.includes(n.type)) && !!targetFor(n));
                 return (
                   <li key={n.id} onClick={() => onNoteClick(n)} data-testid={`notif-item-${n.id}`}
                     className={`px-3 py-2.5 text-sm hover:bg-slate-50 transition-colors ${clickable ? "cursor-pointer" : ""} ${n.type === "handover_not_received" || n.type === "correction_escalated" ? "bg-red-50" : ""} ${reported ? "bg-amber-50" : ""}`}>

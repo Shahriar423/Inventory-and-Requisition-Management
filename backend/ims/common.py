@@ -173,7 +173,65 @@ def clean_user(doc: dict) -> dict:
 MUST_CHANGE_ALLOWED_PATHS = ("/auth/change-password", "/auth/me", "/auth/logout", "/auth/permissions")
 
 
+# ---- General settings (company, currency, time zone, units) ---------------------------------------
+# Edited by the Super Admin on the Settings screen and stored in system_settings under "general". The values below
+# are only the defaults used until something is saved. PDF builders are synchronous, so they read the last loaded
+# copy through general(); it is refreshed from the database at most every 20 seconds (on any signed-in request),
+# which also keeps several server workers in step.
+GENERAL_DEFAULTS = {
+    "company_name": "Primitek Group",
+    "company_legal_name": "Primitek Industries Limited",
+    "company_tagline": "A concern of Primitek Group \u2014 Delivering Excellence",
+    "company_address": "Head Office: Primitek Tower, House 43/B, Road 24, Block CWS(B), Gulshan 1, Dhaka-1212, Bangladesh",
+    "currency_code": "BDT",
+    "currency_symbol": "\u09f3",
+    "utc_offset_hours": 6.0,
+    "timezone_label": "Bangladesh",
+    "uom_options": ["Pcs", "Set", "Box", "Unit", "Nos"],
+    "default_uom": "Nos",
+    "default_delivery_location": "Head Office",
+    "delivery_locations": ["Main Head Office", "PIL Warehouse", "Zara Warehouse", "Fardin Warehouse"],
+}
+_GENERAL: dict = dict(GENERAL_DEFAULTS)
+_GENERAL_LOADED_AT = 0.0
+
+
+def general() -> dict:
+    """The last loaded general settings (defaults until the first load)."""
+    return _GENERAL
+
+
+async def get_general_settings(force: bool = True) -> dict:
+    global _GENERAL, _GENERAL_LOADED_AT
+    import time
+    if not force and time.monotonic() - _GENERAL_LOADED_AT < 20:
+        return _GENERAL
+    saved = await settings_repo.get("general") or {}
+    merged = dict(GENERAL_DEFAULTS)
+    for k in GENERAL_DEFAULTS:
+        if saved.get(k) not in (None, "", []):
+            merged[k] = saved[k]
+    _GENERAL, _GENERAL_LOADED_AT = merged, time.monotonic()
+    return _GENERAL
+
+
+def audit_tz():
+    return timezone(timedelta(hours=float(_GENERAL["utc_offset_hours"])))
+
+
+def tz_short() -> str:
+    h = float(_GENERAL["utc_offset_hours"])
+    return f"UTC{h:+g}"
+
+
+def esc(text) -> str:
+    """Escape text for ReportLab Paragraph markup."""
+    from xml.sax.saxutils import escape
+    return escape(str(text or ""))
+
+
 async def get_current_user(request: Request) -> dict:
+    await get_general_settings(force=False)
     # Authorization header takes priority over the cookie. Multiple browser tabs share one
     # cookie jar, so relying on the cookie would make every tab silently follow whichever
     # account most recently logged in elsewhere. The frontend stores its token per-tab
@@ -386,6 +444,123 @@ async def _notify_with_delegate(approver: Optional[dict], ntype: str, message: s
     await _notify(str(approver["_id"]), ntype, message, **extra)
     if _delegation_active(approver):
         await _notify(approver["delegate_user_id"], ntype, f"(Delegated to you) {message}", **extra)
+
+
+# Dashboard cards the bell links to (the dashboard scrolls to and highlights the card named in ?focus=).
+LINK_MY_QUEUE = "/requisitions/approve"
+LINK_PO_PENDING = "/purchase/po-approvals"
+
+
+async def _super_admins() -> List[dict]:
+    return [u for u in await users_repo.list_all() if u.get("role") == "super_admin"]
+
+
+async def _notify_super_admins(ntype: str, message: str, skip_ids: set, skip_name: Optional[str] = None, **extra) -> None:
+    """Super Admin can act on any step, so they are told about every approval that is waiting too."""
+    for sa in await _super_admins():
+        sid = str(sa["_id"])
+        if sid in skip_ids or (skip_name and sa.get("name") == skip_name):
+            continue
+        await _notify(sid, ntype, f"(Super Admin) {message}", **extra)
+
+
+async def notify_current_approver(d: dict, actor: Optional[str] = None, note: Optional[str] = None,
+                                  verb: str = "approved") -> None:
+    """Tell whoever now holds the pending approval step of requisition `d` that it is waiting for them
+    (their on-leave delegate and the Super Admin too). The bell item opens the approval list."""
+    try:
+        cur = next((st for st in (d.get("approval_chain") or []) if st.get("status") == "pending"), None)
+        if not cur:
+            return
+        no = d.get("requisition_no") or "A requisition"
+        label = cur.get("label") or "approval"
+        if actor:
+            msg = f"{actor} {verb} {no}. It now needs your approval ({label})."
+        else:
+            msg = f"{no} from {d.get('requisitioner_name') or 'an employee'} needs your approval ({label})."
+        if note and note.strip():
+            msg += f' Note: "{note.strip()}"'
+        extra = dict(requisition_id=str(d["_id"]), link=LINK_MY_QUEUE)
+        skip = set()
+        if cur.get("approver_id") and ObjectId.is_valid(cur["approver_id"]):
+            approver = await users_repo.get(cur["approver_id"])
+            if approver:
+                skip.add(str(approver["_id"]))
+                if approver.get("delegate_user_id"):
+                    skip.add(approver["delegate_user_id"])
+                await _notify_with_delegate(approver, "approval_needed", msg, **extra)
+        await _notify_super_admins("approval_needed", msg, skip, actor, **extra)
+    except Exception:
+        logging.getLogger(__name__).exception("Could not send the approval notification")
+
+
+async def notify_po_stage(po: dict, actor: Optional[str] = None, note: Optional[str] = None) -> None:
+    """Tell the holders of the PO's current approval stage (Purchase Head / MD / Accounts Head), their
+    delegates and the Super Admin that a Purchase Order is waiting. The bell item opens PO Approvals."""
+    try:
+        role = PO_STAGE_ROLE.get(po.get("status"))
+        if not role:
+            return
+        msg = (f"{actor} approved Purchase Order {po.get('po_number')}. It now needs your approval."
+               if actor else f"Purchase Order {po.get('po_number')} was submitted and needs your approval.")
+        if po.get("grand_total") is not None:
+            msg += f" Total: {bdt_text(po['grand_total'])}."
+        if note and note.strip():
+            msg += f' Note: "{note.strip()}"'
+        extra = dict(po_id=str(po["_id"]), link=LINK_PO_PENDING)
+        skip = set()
+        for h in await _po_stage_holders(role):
+            skip.add(str(h["_id"]))
+            if h.get("delegate_user_id"):
+                skip.add(h["delegate_user_id"])
+            await _notify_with_delegate(h, "po_approval_needed", msg, **extra)
+        await _notify_super_admins("po_approval_needed", msg, skip, actor, **extra)
+    except Exception:
+        logging.getLogger(__name__).exception("Could not send the PO approval notification")
+
+
+async def notify_returned(d: dict, action: str, actor: str, note: Optional[str]) -> None:
+    """The requisition went BACK to someone: revise -> the requester, pr_revise -> the PR raiser,
+    reject -> the requester (informational). The bell item opens the matching list."""
+    try:
+        no = d.get("requisition_no") or "Your requisition"
+        n = f' "{note.strip()}"' if note and note.strip() else ""
+        if action == "revise":
+            to, ntype, link = d.get("requisitioner_id"), "revision_requested", "/requisitions/pending?status=revision_requested"
+            msg = f"Action needed: {actor} sent {no} back for changes.{(' Reason:' + n) if n else ''} Please edit and resubmit it."
+        elif action == "pr_revise":
+            to, ntype, link = d.get("pr_filed_by_id") or d.get("requisitioner_id"), "pr_revision_requested", "/requisitions/purchase"
+            msg = f"Action needed: {actor} sent the Purchase Requisition of {no} back for changes.{(' Reason:' + n) if n else ''}"
+        else:
+            to, ntype, link = d.get("requisitioner_id"), "requisition_rejected", "/requisitions/history?status=rejected"
+            msg = f"{actor} rejected {no}.{(' Reason:' + n) if n else ''}"
+        await _notify(to, ntype, msg, requisition_id=str(d["_id"]), link=link)
+    except Exception:
+        logging.getLogger(__name__).exception("Could not send the returned-requisition notification")
+
+
+async def notify_work_queue(d: dict) -> None:
+    """The requisition just reached a work queue: PR raisers (out of stock) or PO creators (PR approved)."""
+    try:
+        no = d.get("requisition_no") or "A requisition"
+        if d.get("status") == "pending_pr":
+            for u in await users_repo.list_pr_processors():
+                await _notify(str(u["_id"]), "work_assigned", f"{no} is out of stock and needs a Purchase Requisition.",
+                              requisition_id=str(d["_id"]), link="/requisitions/purchase")
+        elif d.get("status") == "pending_po_entry":
+            for u in await users_repo.list_all():
+                if u.get("can_create_po"):
+                    await _notify(str(u["_id"]), "work_assigned", f"{no} is approved and needs a Purchase Order.",
+                                  requisition_id=str(d["_id"]), link="/requisitions/purchase-order")
+    except Exception:
+        logging.getLogger(__name__).exception("Could not send the work-queue notification")
+
+
+def bdt_text(amount) -> str:
+    try:
+        return f"{general().get('currency_symbol') or ''}{float(amount):,.2f}"
+    except (TypeError, ValueError):
+        return str(amount)
 
 
 def step_pending_since(d: dict, step: dict) -> datetime:
@@ -1265,7 +1440,6 @@ async def get_po_threshold() -> float:
     return doc["amount"] if doc else DEFAULT_PO_THRESHOLD
 
 
-_AUDIT_TZ = timezone(timedelta(hours=6))      # Bangladesh time (UTC+6); the report says so in its header
 
 
 _AUDIT_ACTION_LABELS = {
@@ -1298,7 +1472,7 @@ _AUDIT_ACTION_LABELS = {
 
 def _a_dt(v) -> str:
     dt = _parse_iso(v) if isinstance(v, str) else v
-    return dt.astimezone(_AUDIT_TZ).strftime("%d %b %Y, %H:%M") if dt else "-"
+    return dt.astimezone(audit_tz()).strftime("%d %b %Y, %H:%M") if dt else "-"
 
 
 def _a_label(action: str) -> str:

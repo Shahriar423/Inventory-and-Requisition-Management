@@ -31,7 +31,7 @@ from ims.common import (
     IT_TEAM_LABELS,
     PRODUCT_TYPE_LABELS,
     RP_UNIT_STATUS_LABEL,
-    _AUDIT_TZ,
+    audit_tz,
     _a_dt,
     _held_filter,
     _notify,
@@ -315,7 +315,7 @@ def _rp_has(val, needle: str) -> bool:
 
 def _rp_local_date(iso) -> str:
     dt = _parse_iso(iso) if isinstance(iso, str) else None
-    return dt.astimezone(_AUDIT_TZ).strftime("%Y-%m-%d") if dt else ""
+    return dt.astimezone(audit_tz()).strftime("%Y-%m-%d") if dt else ""
 
 
 def _rp_in_range(iso, f: dict) -> bool:
@@ -872,7 +872,7 @@ def _rp_export_response(fmt: str, rtype: str, result: dict, name: str, who: str,
     if result["warnings"]:
         info.append(("Note", " ".join(result["warnings"])))
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name or d["label"]).strip("_") or "report"
-    stamp = datetime.now(_AUDIT_TZ).strftime("%Y%m%d_%H%M")
+    stamp = datetime.now(audit_tz()).strftime("%Y%m%d_%H%M")
     if fmt == "pdf":
         body, mt, ext = _rp_pdf_bytes(name or d["label"], result["columns"], result["rows"], info, who), "application/pdf", "pdf"
     else:

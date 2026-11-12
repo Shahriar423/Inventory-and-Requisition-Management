@@ -11,6 +11,9 @@ from ims.repositories import products as prod_repo
 from ims.repositories import counters as counter_repo
 from ims.repositories import files_repo
 from ims.common import (
+    notify_po_stage,
+    _notify,
+    PO_STAGE_ROLE,
     FINALIZED,
     ROLE_LABELS,
     _department_is_purchase,
@@ -400,6 +403,7 @@ async def submit_purchase_order(po_id: str, user: dict = Depends(get_current_use
     await sync_requisition_status_from_po(
         po, user["name"], "po_submitted",
         f"Purchase Order {po['po_number']} submitted for approval ({next_status.replace('_', ' ')}).")
+    await notify_po_stage(po)
     return await _hide_quotes_if_not_allowed(await _enrich_po(po), po, user)
 
 
@@ -475,5 +479,13 @@ async def act_on_purchase_order(po_id: str, payload: POActionIn, user: dict = De
         po, user["name"], "po_" + next_status,
         f"Purchase Order {po['po_number']}: {payload.action}d by {ROLE_LABELS.get(stage_role, stage_role)} "
         f"→ {next_status.replace('_', ' ')}.".replace("rejectd", "rejected"))
+    if payload.action != "reject" and next_status in PO_STAGE_ROLE:
+        await notify_po_stage(po, actor=user["name"], note=note_to_save)
+    if payload.action == "reject" or next_status == "approved":
+        word = "rejected" if payload.action == "reject" else "fully approved"
+        tail = f' Reason: "{payload.comment.strip()}"' if payload.action == "reject" and (payload.comment or "").strip() else ""
+        await _notify(po.get("created_by_id"), "po_rejected" if payload.action == "reject" else "po_approved",
+                      f"Purchase Order {po.get('po_number')} was {word} by {user['name']}.{tail}",
+                      po_id=str(po["_id"]), link=f"/purchase/orders/{po['_id']}")
 
     return await _hide_quotes_if_not_allowed(await _enrich_po(po), po, user)
