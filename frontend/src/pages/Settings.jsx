@@ -60,7 +60,7 @@ export default function Settings() {
     <div className="space-y-6 max-w-3xl" data-testid="settings-page">
       <div>
         <h2 className="font-head text-xl font-semibold text-slate-900">Settings</h2>
-        <p className="text-sm text-slate-500">Business limits. Changes apply immediately, no code change needed.</p>
+        <p className="text-sm text-slate-500">Business limits. Changes apply immediately.</p>
       </div>
 
       <section className={card} data-testid="md-limit-card">

@@ -52,9 +52,6 @@ function Group({ group }) {
           {group.group}
         </span>
         <span className="flex items-center gap-2">
-          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/5 text-slate-400 border border-white/10">
-            {group.badge}
-          </span>
           <ChevronDown size={14} className={`transition-transform duration-200 ${open ? "" : "-rotate-90"}`} />
         </span>
       </button>
@@ -131,7 +128,7 @@ export default function Sidebar({ open = false, onClose = () => {}, isDesktop = 
         </nav>
 
         <div className="px-5 py-3 border-t border-white/10 text-[11px] font-mono text-slate-500">
-          IRM v1.0 · SUP
+          IRM v1.0
         </div>
       </aside>
     </>

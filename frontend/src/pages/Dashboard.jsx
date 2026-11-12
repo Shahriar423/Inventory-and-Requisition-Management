@@ -94,7 +94,7 @@ export default function Dashboard() {
             {personal ? "My Dashboard" : department ? "Department Overview" : "Overview"}
           </h2>
           <p className="text-slate-500 text-sm mt-1">
-            {personal ? "Your own requisitions and assigned assets."
+            {personal ? "Your requisition cards"
               : department ? "Requisitions and assets within your department."
               : "Snapshot of requisitions across the organization."}
           </p>
