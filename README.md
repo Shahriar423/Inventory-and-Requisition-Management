@@ -124,7 +124,7 @@ Menus are enforced both in the UI and on the server. Data visibility is three-le
 ### Prerequisites
 
 - **Python** 3.10 or newer
-- **Node.js** 18 or newer, and **Yarn** (recommended; npm also works)
+- **Node.js** 18 or newer, and **Npm** 
 - **MySQL** 8, running locally 
 
 ### 1. Backend
