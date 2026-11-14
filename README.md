@@ -92,7 +92,6 @@ Menus are enforced both in the UI and on the server. Data visibility is three-le
 
 **Backend**
 - Python 3 and FastAPI, served with Uvicorn
-- MongoDB with Motor (async driver)
 - JWT sign-in (cookie plus bearer header), bcrypt password hashing
 - ReportLab (PDFs), openpyxl (Excel import/templates)
 
@@ -126,7 +125,7 @@ Menus are enforced both in the UI and on the server. Data visibility is three-le
 
 - **Python** 3.10 or newer
 - **Node.js** 18 or newer, and **Yarn** (recommended; npm also works)
-- **MongoDB** 6 or newer, running locally (`mongodb://localhost:27017`) or a MongoDB Atlas connection string
+- **MySQL** 8, running locally 
 
 ### 1. Backend
 
@@ -137,7 +136,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env               # Windows: copy .env.example .env
-# edit .env: set MONGO_URL, DB_NAME, JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD ...
+
 ```
 
 Create the base departments and the first Super Admin (a new database has no users, so you cannot sign in until you do this):
@@ -159,8 +158,8 @@ The API is now at `http://localhost:8001/api` and interactive docs are at `http:
 ```bash
 cd frontend
 cp .env.example .env               # Windows: copy .env.example .env
-yarn install                       # or: npm install
-yarn start                         # or: npm start
+# npm install                       
+# npm start                        
 ```
 
 Open `http://localhost:3000` and sign in with the Super Admin email and password from step 1.
@@ -171,7 +170,7 @@ Open `http://localhost:3000` and sign in with the Super Admin email and password
 
 ```bash
 cd frontend
-yarn build                         # outputs frontend/build, serve it with any static host
+npm build                         # outputs frontend/build, serve it with any static host
 ```
 
 Run the backend with several workers behind HTTPS, for example:
@@ -188,7 +187,6 @@ and set `FRONTEND_URL` to your real site address so CORS allows it.
 
 | Variable | Required | Description |
 |---|---|---|
-| `MONGO_URL` | yes | MongoDB connection string. |
 | `DB_NAME` | yes | Database name. |
 | `JWT_SECRET` | yes | Long random secret used to sign login tokens. |
 | `FRONTEND_URL` | yes | Origin of the React app (CORS). `http://localhost:3000` is always allowed. |
@@ -262,5 +260,3 @@ Departments must have their heads in place, because the approval chain finds eac
 - Scheduled database backups
 
 ## License
-
-Add your license here (for example MIT), or state that the project is private/internal.
